@@ -97,6 +97,7 @@
   }
 
   // ===== 2. Auth View =====
+
   async function switchToAuthView() {
     stopPolling();
     $('dashboardView').classList.add('hidden');
@@ -104,7 +105,8 @@
     try {
       const boot = await api('/api/auth/bootstrap');
       setAuthMode(boot.hasAnyUser ? 'login' : 'register');
-    } catch (_) {}
+    } catch (_) {
+    }
   }
 
   function setAuthMode(mode) {
@@ -127,7 +129,13 @@
       btn.disabled = true;
       try {
         const endpoint = state.authMode === 'register' ? '/api/auth/register' : '/api/auth/login';
-        const res = await api(endpoint, { method: 'POST', body: { username, password } });
+        const res = await api(endpoint, {
+          method: 'POST',
+          body: {
+            username,
+            password,
+          }
+        });
         state.user = res.user;
         $('authPassword').value = '';
         showToast(`欢迎回来，${res.user.username}`);
@@ -276,7 +284,7 @@
               <button class="btn btn-primary btn-sm" data-act="open-web" data-id="${d.id}">进入控制</button>
               <button class="btn btn-secondary btn-sm" data-act="keep-settings" data-id="${d.id}">保活策略</button>
               <button class="btn btn-secondary btn-sm" data-act="wakeup" data-id="${d.id}">开机</button>
-              <button class="btn btn-secondary btn-sm" data-act="shutdown" data-id="${d.id}">关机</button>
+              <button class="btn btn-secondary btn-sm" data-act="reboot" data-id="${d.id}">重启</button>
             </div>
           </div>
         `;
@@ -349,7 +357,7 @@
         window.open('/control.html?device=' + encodeURIComponent(id), '_blank', 'noopener,noreferrer');
       } else if (act === 'keep-settings') {
         openKeepaliveSettings(id);
-      } else if (act === 'wakeup' || act === 'shutdown') {
+      } else if (act === 'wakeup' || act === 'reboot') {
         btn.disabled = true;
         try {
           const r = await api(`/api/devices/${id}/power`, { method: 'POST', body: { action: act } });

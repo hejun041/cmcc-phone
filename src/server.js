@@ -430,8 +430,10 @@ function createApp({
       if (!acc) return sendJson(res, 404, { ok: false, error: '关联的移动账号不存在' });
 
       const body = await readJsonBody(req);
-      const action = body.action;
+      let action = body.action;
       if (!['wakeup','reboot','shutdown'].includes(action)) return sendJson(res,400,{ok:false,error:'不支持的电源动作'});
+      // 官方无真关机接口：关机动作统一按重启处理（2026-11-04 修改）
+      if (action === 'shutdown') action = 'reboot';
       engine.pauseForPower(dev.id, 90000);
       if (action === 'wakeup') {
         await cmccClient.ensureDeviceReady(acc, dev.phoneId, dev.platformType, 45000);
