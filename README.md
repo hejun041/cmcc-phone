@@ -70,7 +70,3 @@ docker compose up -d
 
 - 所有账号、设备与令牌数据都存放在容器的 `/app/data` 目录（`DATA_DIR` 环境变量可改），务必挂载到宿主机目录或命名卷（如上例），否则重建容器会丢失数据。
 - 升级镜像：`docker pull lusean23/cmcc-phone:latest` 后重建容器即可，数据卷不受影响。
-
-### 维护者：自动构建
-
-仓库的 GitHub Actions 工作流（`.github/workflows/docker-publish.yml`）会在 `Dockerfile`、`src/`、`public/` 等文件变更推送到 `main` 时自动构建并推送镜像，也可在 Actions 页手动触发。需要在仓库 Settings → Secrets and variables → Actions 中配置两个密钥：`DOCKERHUB_USERNAME` 与 `DOCKERHUB_TOKEN`（Docker Hub 访问令牌）。
