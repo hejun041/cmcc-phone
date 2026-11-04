@@ -142,6 +142,15 @@
 
   // ===== 3. Dashboard =====
   async function enterDashboard() {
+    const device = new URLSearchParams(location.search).get('device');
+    if (location.pathname === '/control.html' && device) {
+      $('authView').classList.add('hidden');
+      $('dashboardView').classList.add('hidden');
+      await refreshDashboard(true);
+      await openWebViewer(device);
+      return;
+    }
+
     $('authView').classList.add('hidden');
     $('dashboardView').classList.remove('hidden');
     $('currentUserText').textContent = `${state.user.username} · ${state.user.role === 'admin' ? '系统管理员' : '独立租户'}`;
@@ -337,7 +346,7 @@
       const id = btn.getAttribute('data-id');
 
       if (act === 'open-web') {
-        openWebViewer(id);
+        window.open('/control.html?device=' + encodeURIComponent(id), '_blank', 'noopener,noreferrer');
       } else if (act === 'keep-settings') {
         openKeepaliveSettings(id);
       } else if (act === 'wakeup' || act === 'shutdown') {
@@ -629,7 +638,7 @@
 
   // ===== 6. Web Remote Control Viewer =====
   async function openWebViewer(deviceId) {
-    await destroyActivePlayers(false);
+    await destroyActivePlayers(true);
     state.activeDeviceId = deviceId;
     const dev = state.devices.find((d) => d.id === deviceId);
     $('viewerPhoneName').textContent = dev ? dev.phoneName : '移动云手机';
@@ -761,6 +770,7 @@
       $('viewerModal').classList.add('hidden');
       await destroyActivePlayers(true);
       showToast('已退出控制，恢复后台保活');
+      if (location.pathname === '/control.html') { window.close(); location.replace('/'); }
     });
 
     $('viewerReconnectBtn').addEventListener('click', async () => {
@@ -768,6 +778,7 @@
       if (!id) return;
       await destroyActivePlayers(false);
       state.activeDeviceId = id;
+      state.leaseHeartbeatTimer = setInterval(() => { if(state.activeDeviceId) api(`/api/devices/${state.activeDeviceId}/stream/heartbeat`, {method:'POST'}).catch(()=>{}); }, 20000);
       await connectViewerStream();
     });
 
@@ -794,5 +805,6 @@
     });
   }
 
+  window.addEventListener('pagehide', () => { if(state.activeDeviceId) navigator.sendBeacon(`/api/devices/${state.activeDeviceId}/stream/close`, '{}'); });
   document.addEventListener('DOMContentLoaded', init);
 })();
