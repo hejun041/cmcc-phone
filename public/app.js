@@ -253,7 +253,7 @@
         const rt = d.runtime || {};
         const plat = String(d.platformType) === '2' ? 'T版' : '云版';
         const scheduleDesc =
-          d.keepaliveMode === 'cycle'
+          d.keepaliveMode !== 'continuous'
             ? `循环模式：等待 ${d.waitMinutes || 5} 分钟 → 连接 ${d.connectMinutes || 5} 分钟${rt.nextConnectAt ? ` · 下次连接 ${formatTime(rt.nextConnectAt)}` : ''}`
             : '默认模式：持续长期长连接保活';
 
@@ -404,7 +404,7 @@
     const panel = $('keepaliveSettingsPanel');
     panel.dataset.deviceId = id;
     $('keepaliveSettingsName').textContent = `${dev.phoneName} (${dev.phoneId})`;
-    $('keepaliveModeSelect').value = dev.keepaliveMode || 'continuous';
+    $('keepaliveModeSelect').value = dev.keepaliveMode || 'cycle';
     $('keepaliveWaitInput').value = dev.waitMinutes || 5;
     $('keepaliveDurationInput').value = dev.connectMinutes || 5;
     $('keepaliveEnabledInput').checked = dev.keepaliveEnabled !== false;

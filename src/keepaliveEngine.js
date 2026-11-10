@@ -105,7 +105,7 @@ class KeepaliveEngine {
 
     const rt = this._ensureRuntime(dev);
     if (rt.powerHoldUntil > Date.now()) return;
-    if (dev.keepaliveMode === 'cycle') {
+    if (dev.keepaliveMode !== 'continuous') {
       const wait = (dev.waitMinutes || 5) * 60000;
       const connect = (dev.connectMinutes || 5) * 60000;
       const elapsed = Math.max(0, Date.now() - (dev.scheduleStartedAt || dev.updatedAt));

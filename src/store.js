@@ -373,6 +373,7 @@ class MultiTenantStore {
           endTime: rd.endTime || '',
           specName: rd.specName || '',
           keepaliveEnabled: true, // Default enable keepalive on newly synced cloud phones
+          keepaliveMode: 'cycle',
           autoWakeup: true,
           screenshotCache: '',
           screenshotUpdatedAt: null,
