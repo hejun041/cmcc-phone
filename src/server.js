@@ -9,6 +9,9 @@ const { CmccClient, generateDeviceFingerprint } = require('./cmccClient');
 const { KeepaliveEngine } = require('./keepaliveEngine');
 const { YunzhiClient } = require('./yunzhiClient');
 const { createYunzhiRoutes } = require('./yunzhiRoutes');
+const { TeleaiClient } = require('./teleaiClient');
+const { TeleaiKeepaliveEngine } = require('./teleaiKeepalive');
+const { ClinkManager } = require('./teleai/clinkManager');
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -73,12 +76,15 @@ function createApp({
   publicDir = path.join(__dirname, '..', 'public'),
   cmccClient = new CmccClient(),
   yunzhiClient,
+  teleaiClient = new TeleaiClient(),
   engineOptions = {},
 } = {}) {
   const store = new MultiTenantStore(dataDir);
   const yunzhi = yunzhiClient || new YunzhiClient({ installationId: store.installationId });
   const engine = new KeepaliveEngine({ store, cmccClient, yunzhiClient: yunzhi, options: engineOptions });
   const yunzhiRoutes = createYunzhiRoutes({ store, engine, client: yunzhi, readJsonBody, sendJson });
+  const teleaiEngine = new TeleaiKeepaliveEngine({ store, client: teleaiClient });
+  const clinkManager = new ClinkManager({ store, client: teleaiClient });
 
   // Ephemeral captcha verification sessions scoped by platform user id
   // sessionId -> { ownerId, mobile, captchaToken, secretKey, fingerprint, smsSent, createdAt }
@@ -142,6 +148,40 @@ function createApp({
       account: store.sanitizeAccount(hydrated),
       deviceCount: syncedDevices.length,
     };
+  }
+
+  async function finalizeTeleaiBind(ownerId, loginData, remark = '') {
+    const account = store.upsertTeleaiAccount(ownerId, {
+      loginName: loginData.loginName,
+      password: loginData.password,
+      remark,
+      operationToken: loginData.operationToken,
+      operToken: loginData.operToken,
+      aesKey: loginData.aesKey,
+      aesIv: loginData.aesIv,
+      expiresAt: loginData.expiresAt,
+    });
+    store.appendLog(ownerId, {
+      level: 'success',
+      message: `星辰智能体电脑账号 ${account.loginName} 登录成功，正在同步实例…`,
+    });
+    let instances = [];
+    try {
+      const remote = await teleaiClient.listInstances(loginData);
+      instances = store.syncTeleaiInstances(ownerId, account.id, remote);
+      store.appendLog(ownerId, {
+        level: 'info',
+        message: `星辰电脑同步完成，共 ${instances.length} 个实例`,
+      });
+    } catch (err) {
+      store.appendLog(ownerId, {
+        level: 'warn',
+        message: `账号已保存，但拉取实例失败：${err.message}`,
+      });
+    }
+    teleaiEngine.reconcileAll();
+    const saved = store.listTeleaiAccountsByOwner(ownerId).find((a) => a.id === account.id);
+    return { account: saved || null, instanceCount: instances.length };
   }
 
   async function handleApi(req, res, pathname) {
@@ -277,12 +317,24 @@ function createApp({
         runtime: engine.getRuntimeSnapshot(d.id),
       }));
       const logs = store.getLogsForOwner(currentUser.id, 100);
+      const teleaiAccounts = store.listTeleaiAccountsByOwner(currentUser.id);
+      const teleaiAccountMap = new Map(teleaiAccounts.map((a) => [a.id, a]));
+      const teleaiInstances = store.listTeleaiInstancesByOwner(currentUser.id).map((i) => ({
+        ...i,
+        accountLogin: teleaiAccountMap.get(i.accountId)?.loginName || '',
+        accountRemark: teleaiAccountMap.get(i.accountId)?.remark || '',
+        accountAuthStatus: teleaiAccountMap.get(i.accountId)?.authStatus || 'valid',
+        runtime: teleaiEngine.getRuntimeSnapshot(i.id),
+        clink: clinkManager.snapshot(i.id),
+      }));
       return sendJson(res, 200, {
         ok: true,
         user: currentUser,
         accounts,
         devices,
         logs,
+        teleaiAccounts,
+        teleaiInstances,
         providers: { cmcc: true, yunzhi: yunzhi.isConfigured() },
       });
     }
@@ -392,6 +444,191 @@ function createApp({
         body.remark
       );
       return sendJson(res, 200, { ok: true, ...result });
+    }
+
+    // ----- 星晨超级智能体电脑（TeleAgent）渠道 -----
+    if (req.method === 'POST' && pathname === '/api/teleai/login') {
+      const body = await readJsonBody(req);
+      const loginName = String(body.loginName || '').trim();
+      const password = String(body.password || '');
+      if (!loginName || !password) {
+        return sendJson(res, 400, { ok: false, error: '请填写星辰智能体电脑账号与密码' });
+      }
+      const data = await teleaiClient.loginWithPassword(loginName, password);
+      const result = await finalizeTeleaiBind(
+        currentUser.id,
+        { ...data, password },
+        body.remark
+      );
+      return sendJson(res, 200, { ok: true, ...result });
+    }
+
+    const tlAccRenewMatch = pathname.match(/^\/api\/teleai\/accounts\/([a-f0-9-]+)\/renew$/i);
+    if (tlAccRenewMatch && req.method === 'POST') {
+      const acc = store.getTeleaiAccountForOwner(currentUser.id, tlAccRenewMatch[1]);
+      if (!acc) return sendJson(res, 404, { ok: false, error: '未找到该星辰账号或无权操作' });
+      if (!acc.password) return sendJson(res, 400, { ok: false, error: '该账号未保存密码，请解绑后重新绑定以支持一键续期' });
+      const data = await teleaiClient.loginWithPassword(acc.loginName, acc.password);
+      store.updateTeleaiAccountTokens(acc.id, {
+        operationToken: data.operationToken,
+        operToken: data.operToken,
+        aesKey: data.aesKey,
+        aesIv: data.aesIv,
+        expiresAt: data.expiresAt,
+        authStatus: 'valid',
+        renewed: true,
+      });
+      let instanceCount = 0;
+      try {
+        const remote = await teleaiClient.listInstances(data);
+        instanceCount = store.syncTeleaiInstances(currentUser.id, acc.id, remote).length;
+      } catch (_) {
+        /* token 已续期，实例同步失败不影响结果 */
+      }
+      teleaiEngine.reconcileAll();
+      store.appendLog(currentUser.id, {
+        level: 'success',
+        message: `星辰账号 ${acc.loginName} 续期成功，新 Token 有效期至 ${data.expiresAt ? new Date(data.expiresAt).toLocaleString('zh-CN') : '未知'}`,
+      });
+      return sendJson(res, 200, { ok: true, expiresAt: data.expiresAt, instanceCount });
+    }
+
+    const tlAccSyncMatch = pathname.match(/^\/api\/teleai\/accounts\/([a-f0-9-]+)\/sync$/i);
+    if (tlAccSyncMatch && req.method === 'POST') {
+      const acc = store.getTeleaiAccountForOwner(currentUser.id, tlAccSyncMatch[1]);
+      if (!acc) return sendJson(res, 404, { ok: false, error: '未找到该星辰账号或无权操作' });
+      const remote = await teleaiClient.listInstances(acc);
+      const instances = store.syncTeleaiInstances(currentUser.id, acc.id, remote);
+      teleaiEngine.reconcileAll();
+      return sendJson(res, 200, { ok: true, instanceCount: instances.length });
+    }
+
+    const tlAccDelMatch = pathname.match(/^\/api\/teleai\/accounts\/([a-f0-9-]+)$/i);
+    if (tlAccDelMatch && req.method === 'DELETE') {
+      const acc = store.getTeleaiAccountForOwner(currentUser.id, tlAccDelMatch[1]);
+      if (acc) {
+        for (const inst of store.listTeleaiInstancesByOwner(currentUser.id)) {
+          if (inst.accountId === acc.id) teleaiEngine.stop(inst.id);
+        }
+      }
+      store.deleteTeleaiAccountForOwner(currentUser.id, tlAccDelMatch[1]);
+      store.appendLog(currentUser.id, {
+        level: 'info',
+        message: `已解绑星辰账号 ${acc ? acc.loginName : tlAccDelMatch[1]}`,
+      });
+      return sendJson(res, 200, { ok: true });
+    }
+
+    const tlPowerMatch = pathname.match(/^\/api\/teleai\/instances\/([a-f0-9-]+)\/power$/i);
+    if (tlPowerMatch && req.method === 'POST') {
+      const inst = store.getTeleaiInstanceForOwner(currentUser.id, tlPowerMatch[1]);
+      if (!inst) return sendJson(res, 404, { ok: false, error: '未找到该星辰电脑实例或无权访问' });
+      const acc = store.getTeleaiAccountForOwner(currentUser.id, inst.accountId);
+      if (!acc) return sendJson(res, 404, { ok: false, error: '关联的星辰账号不存在' });
+      const body = await readJsonBody(req);
+      const action = String(body.action || '');
+      if (!['start', 'restart', 'cancel'].includes(action)) {
+        return sendJson(res, 400, { ok: false, error: '不支持的操作，可用：start / restart / cancel' });
+      }
+      if (action === 'restart' && Number(inst.status) === 3) {
+        await teleaiClient.instanceAction(acc, 'start', inst.instanceId);
+      } else {
+        await teleaiClient.instanceAction(acc, action, inst.instanceId);
+      }
+      store.updateTeleaiInstance(inst.id, { lastStartAt: Date.now(), lastError: '' });
+      store.appendLog(currentUser.id, {
+        level: 'info',
+        deviceId: inst.id,
+        phoneName: inst.name,
+        message:
+          action === 'restart'
+            ? `已下发重启指令（实例 ${inst.instanceId.slice(-6)}）`
+            : action === 'cancel'
+              ? `已取消开机（实例 ${inst.instanceId.slice(-6)}）`
+              : `已下发开机指令（实例 ${inst.instanceId.slice(-6)}）`,
+      });
+      return sendJson(res, 200, { ok: true, action });
+    }
+
+    const tlDesktopMatch = pathname.match(/^\/api\/teleai\/instances\/([a-f0-9-]+)\/desktop$/i);
+    if (tlDesktopMatch && req.method === 'GET') {
+      const inst = store.getTeleaiInstanceForOwner(currentUser.id, tlDesktopMatch[1]);
+      if (!inst) return sendJson(res, 404, { ok: false, error: '未找到该星辰电脑实例或无权访问' });
+      const acc = store.getTeleaiAccountForOwner(currentUser.id, inst.accountId);
+      if (!acc) return sendJson(res, 404, { ok: false, error: '关联的星辰账号不存在' });
+      try {
+        const link = await teleaiClient.connect(acc, inst.instanceId);
+        store.updateTeleaiInstance(inst.id, { connectURL: link.connectURL });
+        store.appendLog(currentUser.id, {
+          level: 'success',
+          deviceId: inst.id,
+          phoneName: inst.name,
+          message: '已获取桌面入口，正在打开官方控制台',
+        });
+        return sendJson(res, 200, { ok: true, connectURL: link.connectURL, previewURL: link.previewURL });
+      } catch (err) {
+        const hint = Number(inst.status) === 3 ? '实例当前已回收，请先开机后再进入控制' : err.message;
+        return sendJson(res, 400, { ok: false, error: hint });
+      }
+    }
+
+    const tlClinkMatch = pathname.match(/^\/api\/teleai\/instances\/([a-f0-9-]+)\/clink$/i);
+    if (tlClinkMatch && req.method === 'POST') {
+      const inst = store.getTeleaiInstanceForOwner(currentUser.id, tlClinkMatch[1]);
+      if (!inst) return sendJson(res, 404, { ok: false, error: '未找到该星辰电脑实例或无权访问' });
+      const acc = store.getTeleaiAccountForOwner(currentUser.id, inst.accountId);
+      if (!acc) return sendJson(res, 404, { ok: false, error: '关联的星辰账号不存在' });
+      const body = await readJsonBody(req);
+      const action = String(body.action || 'start');
+      if (!['start', 'stop', 'restart'].includes(action)) {
+        return sendJson(res, 400, { ok: false, error: '不支持的操作，可用：start / stop / restart' });
+      }
+      if (action === 'stop') {
+        store.updateTeleaiInstance(inst.id, { clinkEnabled: false });
+        clinkManager.stop(inst.id);
+      } else {
+        store.updateTeleaiInstance(inst.id, { clinkEnabled: true });
+        const fresh = store.getTeleaiInstanceForOwner(currentUser.id, inst.id);
+        if (action === 'restart') await clinkManager.restart(inst.id, fresh, acc);
+        else clinkManager.start(fresh, acc);
+      }
+      store.appendLog(currentUser.id, {
+        level: 'info',
+        deviceId: inst.id,
+        phoneName: inst.name,
+        message:
+          action === 'stop'
+            ? `已关闭协议级保活（${inst.instanceId.slice(-6)}）`
+            : `已${action === 'restart' ? '重启' : '开启'}协议级保活（${inst.instanceId.slice(-6)}）`,
+      });
+      return sendJson(res, 200, { ok: true, action, clink: clinkManager.snapshot(inst.id) });
+    }
+
+    const tlSettingsMatch = pathname.match(/^\/api\/teleai\/instances\/([a-f0-9-]+)\/settings$/i);
+    if (tlSettingsMatch && req.method === 'PATCH') {
+      const inst = store.getTeleaiInstanceForOwner(currentUser.id, tlSettingsMatch[1]);
+      if (!inst) return sendJson(res, 404, { ok: false, error: '未找到该星辰电脑实例或无权访问' });
+      const body = await readJsonBody(req);
+      const updated = store.updateTeleaiInstance(inst.id, body);
+      teleaiEngine.reconcileInstance(inst.id);
+      if (!updated.keepaliveEnabled) teleaiEngine.stop(inst.id);
+      const accForClink = store.getTeleaiAccountForOwner(currentUser.id, updated.accountId);
+      if (updated.clinkEnabled && accForClink) {
+        const existing = clinkManager.get(updated.id);
+        if (existing && existing.state !== 'stopped') {
+          if (existing.moveSec !== updated.moveSec) {
+            clinkManager.restart(updated.id, updated, accForClink);
+          }
+        } else {
+          clinkManager.start(updated, accForClink);
+        }
+      } else if (!updated.clinkEnabled) {
+        clinkManager.stop(updated.id);
+      }
+      return sendJson(res, 200, {
+        ok: true,
+        instance: { ...updated, runtime: teleaiEngine.getRuntimeSnapshot(inst.id) },
+      });
     }
 
     // ----- Account Operations (Owner Isolated) -----
@@ -589,20 +826,24 @@ function createApp({
     }
   });
 
-  return { server, store, engine, cmccClient, yunzhiClient: yunzhi };
+  return { server, store, engine, teleaiEngine, clinkManager, cmccClient, teleaiClient, yunzhiClient: yunzhi };
 }
 
 if (require.main === module) {
   const port = Number(process.env.PORT || 8680);
   const host = process.env.HOST || '0.0.0.0';
-  const { server, engine } = createApp();
+  const { server, engine, teleaiEngine: tEngine, clinkManager: cManager } = createApp();
   engine.start();
+  tEngine.reconcileAll();
+  cManager.reconcileAll();
   server.listen(port, host, () => {
     console.log(`[CMCC CloudPhone Manager] Listening on http://${host}:${port}`);
   });
 
   const shutdown = () => {
     engine.stop();
+    tEngine.stopAll();
+    cManager.stopAll();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 2000).unref();
   };

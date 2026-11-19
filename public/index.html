@@ -45,6 +45,7 @@
       </div>
       <div class="header-actions">
         <button id="addAccountBtn" class="btn btn-primary btn-sm">+ 绑定官方账号</button>
+        <button id="addTeleaiBtn" class="btn btn-primary btn-sm">+ 绑定星辰电脑</button>
         <button id="adminBtn" class="btn btn-secondary btn-sm hidden">用户配额</button>
         <button id="refreshBtn" class="btn btn-secondary btn-sm btn-icon" title="刷新状态">↻</button>
         <button id="logoutBtn" class="btn btn-danger btn-sm">退出</button>
@@ -69,6 +70,10 @@
         <span class="kpi-title">累计心跳</span>
         <span class="kpi-value" id="kpiHeartbeats" style="color:var(--cyan);">0</span>
       </div>
+      <div class="kpi-card">
+        <span class="kpi-title">星辰电脑</span>
+        <span class="kpi-value" id="kpiTeleai" style="color:var(--cyan);">0</span>
+      </div>
     </section>
 
     <!-- Accounts -->
@@ -81,6 +86,11 @@
     </div>
     <div id="yunzhiAccountList" class="account-list"></div>
     <div id="yunzhiJobStatus" class="channel-hint" aria-live="polite"></div>
+
+    <div class="section-header">
+      <span class="section-title">星辰智能体电脑账号</span>
+    </div>
+    <div id="teleaiAccountList" class="account-list"></div>
 
     <!-- Inline Keepalive Settings Panel -->
     <section id="keepaliveSettingsPanel" class="settings-panel hidden">
@@ -123,11 +133,12 @@
 
     <!-- Devices Grid -->
     <div class="section-header">
-      <span class="section-title">云手机实例</span>
+      <span class="section-title">云手机 / 星辰电脑实例</span>
       <select id="deviceProviderFilter" class="input provider-filter" aria-label="实例渠道">
         <option value="all">全部渠道</option>
         <option value="cmcc">移动云手机</option>
         <option value="yunzhi">云智手机</option>
+        <option value="teleai">星辰电脑</option>
       </select>
     </div>
     <div id="deviceGrid" class="device-grid"></div>
@@ -215,6 +226,92 @@
         </div>
         <button id="submitPwdBtn" class="btn btn-primary" style="width:100%;margin-top:10px;" type="button">登录并同步</button>
       </div>
+    </div>
+  </div>
+
+  <!-- TeleAgent Bind Modal -->
+  <div id="teleaiModal" class="modal-overlay hidden">
+    <div class="modal-card" style="max-width:420px;">
+      <div class="modal-header">
+        <h2 class="modal-title">绑定星辰智能体电脑</h2>
+        <button id="closeTeleaiBtn" class="close-btn" type="button">&times;</button>
+      </div>
+      <div class="form-group">
+        <label>星辰账号</label>
+        <input id="teleaiLoginName" class="input" type="text" placeholder="账号 / 手机号" autocomplete="username" />
+      </div>
+      <div class="form-group">
+        <label>登录密码</label>
+        <input id="teleaiPassword" class="input" type="password" placeholder="账号密码（用于一键续期）" autocomplete="current-password" />
+      </div>
+      <div class="form-group">
+        <label>备注</label>
+        <input id="teleaiRemark" class="input" type="text" placeholder="例如：星睿 1 号" />
+      </div>
+      <p style="font-size:11px;color:var(--text-tertiary);line-height:1.6;">
+        密码使用 AES-256-GCM 加密保存，仅用于自动登录换取 operationToken；滑块验证码由服务端自动求解。
+      </p>
+      <button id="submitTeleaiBtn" class="btn btn-primary" style="width:100%;margin-top:8px;" type="button">登录并同步实例</button>
+    </div>
+  </div>
+
+  <!-- TeleAgent Keepalive Settings Modal -->
+  <div id="tlSettingsModal" class="modal-overlay hidden">
+    <div class="modal-card" style="max-width:420px;">
+      <div class="modal-header">
+        <h2 class="modal-title">星辰电脑保活策略</h2>
+        <button id="closeTlSettingsBtn" class="close-btn" type="button">&times;</button>
+      </div>
+      <p id="tlSettingsName" style="color:var(--text-secondary);font-size:12px;margin:0 0 12px;"></p>
+      <div class="form-group" style="display:flex;align-items:center;gap:8px;">
+        <input id="tlKeepaliveInput" type="checkbox" checked /> <label style="margin:0;">启用后台巡检保活</label>
+      </div>
+      <div class="form-group" style="display:flex;align-items:center;gap:8px;">
+        <input id="tlAutoStartInput" type="checkbox" checked /> <label style="margin:0;">实例被回收时自动开机</label>
+      </div>
+      <div class="form-group">
+        <label>巡检间隔（秒）</label>
+        <input id="tlIntervalInput" class="input" type="number" min="15" max="86400" value="60" />
+      </div>
+      <div class="form-group" style="display:flex;align-items:center;gap:8px;">
+        <input id="tlClinkInput" type="checkbox" /> <label style="margin:0;">启用协议级保活（CLINK 桌面长连接）</label>
+      </div>
+      <div style="display:flex;gap:12px;">
+        <div class="form-group" style="flex:1;">
+          <label>假鼠标间隔（秒）</label>
+          <input id="tlMoveSecInput" class="input" type="number" min="4" max="600" value="30" />
+        </div>
+        <div class="form-group" style="flex:1;">
+          <label>被踢等待（秒）</label>
+          <input id="tlKickWaitInput" class="input" type="number" min="0" max="86400" value="1800" />
+        </div>
+      </div>
+      <p style="font-size:11px;color:var(--text-tertiary);line-height:1.6;">
+        说明：巡检保活负责「回收后自动拉起 + 状态常驻」；勾选协议级保活会额外建立 CLINK 桌面长连接（三通道心跳 + 假鼠标），
+        这才是服务端眼里的「正在使用」。打开它时若你手动连了桌面，二者会互相顶号，被踢后默认等 30 分钟再回来。
+      </p>
+      <div style="display:flex;gap:10px;margin-top:10px;">
+        <button id="tlSettingsCancelBtn" class="btn btn-secondary btn-sm" type="button" style="flex:1;">取消</button>
+        <button id="tlSettingsSaveBtn" class="btn btn-primary btn-sm" type="button" style="flex:1;">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- TeleAgent Desktop Modal -->
+  <div id="tlDesktopModal" class="viewer-modal hidden">
+    <div class="viewer-header">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span class="viewer-phone-name" id="tlDesktopName">星辰电脑</span>
+        <span class="badge badge-warning" id="tlDesktopStatus">正在获取入口…</span>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button id="tlDesktopReloadBtn" class="btn btn-secondary btn-sm" type="button">重新获取</button>
+        <button id="tlDesktopNewTabBtn" class="btn btn-secondary btn-sm" type="button">新窗口打开</button>
+        <button id="tlDesktopCloseBtn" class="btn btn-danger btn-sm" type="button">关闭</button>
+      </div>
+    </div>
+    <div class="viewer-player-wrap" style="padding:0;">
+      <iframe id="tlDesktopFrame" style="width:100%;height:100%;border:0;background:#000;" allow="clipboard-read;clipboard-write"></iframe>
     </div>
   </div>
 
