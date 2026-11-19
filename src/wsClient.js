@@ -46,6 +46,7 @@ class RawWebSocket extends EventEmitter {
       'User-Agent':
         this.options.userAgent ||
         'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+      ...(this.options.protocols ? { 'Sec-WebSocket-Protocol': String(this.options.protocols) } : {}),
       ...(this.options.headers || {}),
     };
 

@@ -16,6 +16,8 @@ class MultiTenantStore {
       sessions: [],
       accounts: [],
       devices: [],
+      teleaiAccounts: [],
+      teleaiInstances: [],
     };
     this.logsByUser = new Map(); // userId -> array of log items (ring buffer)
     this._load();
@@ -63,6 +65,8 @@ class MultiTenantStore {
       this.state.sessions = Array.isArray(raw.sessions) ? raw.sessions : [];
       this.state.accounts = Array.isArray(raw.accounts) ? raw.accounts : [];
       this.state.devices = Array.isArray(raw.devices) ? raw.devices : [];
+      this.state.teleaiAccounts = Array.isArray(raw.teleaiAccounts) ? raw.teleaiAccounts : [];
+      this.state.teleaiInstances = Array.isArray(raw.teleaiInstances) ? raw.teleaiInstances : [];
     } catch (err) {
       const backup = `${this.dbPath}.corrupt.${Date.now()}`;
       fs.copyFileSync(this.dbPath, backup);
@@ -479,6 +483,264 @@ class MultiTenantStore {
   getLogsForOwner(ownerId, limit = 120) {
     const list = this.logsByUser.get(ownerId) || [];
     return list.slice(-limit).reverse();
+  }
+
+  /* ================= 星晨超级智能体电脑（TeleAgent）渠道 ================= */
+
+  static teleaiState(status, statusReason) {
+    const s = Number(status);
+    if (s === 3) return statusReason === 10 ? 'recycled' : 'stopped';
+    if (s === 100) return 'ready';
+    if (s === 0) return 'unknown';
+    return 'starting';
+  }
+
+  static teleaiStatusText(status, statusReason) {
+    const s = Number(status);
+    if (s === 3) return statusReason === 10 ? '已回收' : '已关机';
+    if (s === 100) return '运行中';
+    if (s === 5) return '排队中';
+    if (s === 2) return '创建中';
+    if (s === 4) return '初始化';
+    return '未知';
+  }
+
+  upsertTeleaiAccount(ownerId, { loginName, password, remark, operationToken, operToken, aesKey, aesIv, expiresAt }) {
+    const user = this.state.users.find((u) => u.id === ownerId);
+    if (!user) throw new Error('所属平台用户不存在');
+    const name = String(loginName || '').trim().toLowerCase();
+    if (!name) throw new Error('账号不能为空');
+
+    let acc = this.state.teleaiAccounts.find((a) => a.ownerId === ownerId && a.loginName === name);
+    const now = Date.now();
+    if (!acc) {
+      const total = this.state.accounts.filter((a) => a.ownerId === ownerId).length
+        + this.state.teleaiAccounts.filter((a) => a.ownerId === ownerId).length;
+      if (total >= user.maxAccounts) {
+        throw new Error(`已达到当前用户可绑定账号上限 (${user.maxAccounts} 个)`);
+      }
+      acc = {
+        id: crypto.randomUUID(),
+        ownerId,
+        channel: 'teleai',
+        loginName: name,
+        remark: remark || '',
+        operationTokenEnc: this.encryptSecret(operationToken || ''),
+        operTokenEnc: this.encryptSecret(operToken || ''),
+        aesKeyEnc: this.encryptSecret(aesKey || ''),
+        aesIv: aesIv || '',
+        tokenExpiresAt: expiresAt || null,
+        passwordEnc: password ? this.encryptSecret(password) : '',
+        authStatus: 'valid',
+        lastCheckAt: now,
+        lastRenewAt: now,
+        createdAt: now,
+      };
+      this.state.teleaiAccounts.push(acc);
+    } else {
+      if (remark !== undefined && remark !== '') acc.remark = remark;
+      if (operationToken) acc.operationTokenEnc = this.encryptSecret(operationToken);
+      if (operToken) acc.operTokenEnc = this.encryptSecret(operToken);
+      if (aesKey) acc.aesKeyEnc = this.encryptSecret(aesKey);
+      if (aesIv) acc.aesIv = aesIv;
+      if (expiresAt) acc.tokenExpiresAt = expiresAt;
+      if (password) acc.passwordEnc = this.encryptSecret(password);
+      acc.authStatus = 'valid';
+      acc.lastCheckAt = now;
+      acc.lastRenewAt = now;
+    }
+    this._save();
+    return this.hydrateTeleaiAccount(acc);
+  }
+
+  updateTeleaiAccountTokens(accountId, patch = {}) {
+    const acc = this.state.teleaiAccounts.find((a) => a.id === accountId);
+    if (!acc) return null;
+    if (patch.operationToken) acc.operationTokenEnc = this.encryptSecret(patch.operationToken);
+    if (patch.operToken !== undefined && patch.operToken !== '') acc.operTokenEnc = this.encryptSecret(patch.operToken);
+    if (patch.aesKey) acc.aesKeyEnc = this.encryptSecret(patch.aesKey);
+    if (patch.aesIv) acc.aesIv = patch.aesIv;
+    if (patch.expiresAt) acc.tokenExpiresAt = patch.expiresAt;
+    if (patch.password) acc.passwordEnc = this.encryptSecret(patch.password);
+    if (patch.authStatus) acc.authStatus = patch.authStatus;
+    if (patch.remark !== undefined) acc.remark = patch.remark;
+    acc.lastCheckAt = Date.now();
+    if (patch.renewed) acc.lastRenewAt = Date.now();
+    this._save();
+    return this.hydrateTeleaiAccount(acc);
+  }
+
+  hydrateTeleaiAccount(acc) {
+    if (!acc) return null;
+    return {
+      id: acc.id,
+      ownerId: acc.ownerId,
+      channel: 'teleai',
+      loginName: acc.loginName,
+      mobile: acc.loginName,
+      remark: acc.remark || '',
+      operationToken: this.decryptSecret(acc.operationTokenEnc),
+      operToken: this.decryptSecret(acc.operTokenEnc),
+      aesKey: this.decryptSecret(acc.aesKeyEnc),
+      aesIv: acc.aesIv || '',
+      password: this.decryptSecret(acc.passwordEnc),
+      hasPassword: Boolean(acc.passwordEnc),
+      tokenExpiresAt: acc.tokenExpiresAt || null,
+      authStatus: acc.authStatus || 'valid',
+      lastCheckAt: acc.lastCheckAt,
+      lastRenewAt: acc.lastRenewAt || null,
+      createdAt: acc.createdAt,
+    };
+  }
+
+  sanitizeTeleaiAccount(acc) {
+    const h = this.hydrateTeleaiAccount(acc);
+    if (!h) return null;
+    return {
+      id: h.id,
+      channel: 'teleai',
+      loginName: h.loginName,
+      mobile: h.loginName,
+      remark: h.remark,
+      hasPassword: h.hasPassword,
+      tokenExpiresAt: h.tokenExpiresAt,
+      authStatus: h.authStatus,
+      lastCheckAt: h.lastCheckAt,
+      lastRenewAt: h.lastRenewAt,
+      createdAt: h.createdAt,
+    };
+  }
+
+  listTeleaiAccountsByOwner(ownerId) {
+    return this.state.teleaiAccounts
+      .filter((a) => a.ownerId === ownerId)
+      .map((a) => this.sanitizeTeleaiAccount(a));
+  }
+
+  listAllTeleaiAccountsInternal() {
+    return this.state.teleaiAccounts.map((a) => this.hydrateTeleaiAccount(a));
+  }
+
+  getTeleaiAccountForOwner(ownerId, accountId) {
+    const acc = this.state.teleaiAccounts.find((a) => a.id === accountId && a.ownerId === ownerId);
+    return acc ? this.hydrateTeleaiAccount(acc) : null;
+  }
+
+  getTeleaiAccountInternal(accountId) {
+    const acc = this.state.teleaiAccounts.find((a) => a.id === accountId);
+    return acc ? this.hydrateTeleaiAccount(acc) : null;
+  }
+
+  deleteTeleaiAccountForOwner(ownerId, accountId) {
+    const before = this.state.teleaiAccounts.length;
+    this.state.teleaiAccounts = this.state.teleaiAccounts.filter(
+      (a) => !(a.id === accountId && a.ownerId === ownerId)
+    );
+    this.state.teleaiInstances = this.state.teleaiInstances.filter(
+      (i) => !(i.accountId === accountId && i.ownerId === ownerId)
+    );
+    const changed = before !== this.state.teleaiAccounts.length;
+    if (changed) this._save();
+    return changed;
+  }
+
+  syncTeleaiInstances(ownerId, accountId, remoteInstances) {
+    const now = Date.now();
+    const seen = new Set();
+    const out = [];
+    for (const ri of remoteInstances || []) {
+      if (!ri || !ri.id) continue;
+      seen.add(ri.id);
+      let inst = this.state.teleaiInstances.find(
+        (i) => i.ownerId === ownerId && i.accountId === accountId && i.instanceId === ri.id
+      );
+      const stateText = MultiTenantStore.teleaiState(ri.status, ri.statusReason);
+      if (!inst) {
+        inst = {
+          id: crypto.randomUUID(),
+          ownerId,
+          accountId,
+          channel: 'teleai',
+          instanceId: ri.id,
+          name: `星辰电脑 ${String(ri.id).slice(-6)}`,
+          status: Number(ri.status) || 0,
+          statusReason: Number(ri.statusReason) || 0,
+          stateText,
+          connectTimeout: ri.connectTimeout || 600,
+          keepaliveEnabled: true,
+          autoStart: true,
+          checkIntervalSec: 60,
+          clinkEnabled: false,
+          moveSec: 30,
+          kickWaitSec: 1800,
+          connectURL: '',
+          connectURLAt: null,
+          lastStartAt: null,
+          lastError: '',
+          updatedAt: now,
+        };
+        this.state.teleaiInstances.push(inst);
+      } else {
+        // 老数据兼容：补齐 CLINK 相关默认值
+        if (inst.clinkEnabled === undefined) inst.clinkEnabled = false;
+        if (inst.moveSec === undefined) inst.moveSec = 30;
+        if (inst.kickWaitSec === undefined) inst.kickWaitSec = 1800;
+        inst.status = Number(ri.status) || 0;
+        inst.statusReason = Number(ri.statusReason) || 0;
+        inst.stateText = stateText;
+        inst.connectTimeout = ri.connectTimeout || inst.connectTimeout;
+        inst.updatedAt = now;
+      }
+      out.push({ ...inst });
+    }
+    this.state.teleaiInstances = this.state.teleaiInstances.filter(
+      (i) => !(i.ownerId === ownerId && i.accountId === accountId && !seen.has(i.instanceId))
+    );
+    this._save();
+    return out;
+  }
+
+  listTeleaiInstancesByOwner(ownerId) {
+    return this.state.teleaiInstances.filter((i) => i.ownerId === ownerId).map((i) => ({ ...i }));
+  }
+
+  listAllTeleaiInstancesInternal() {
+    return this.state.teleaiInstances.map((i) => ({ ...i }));
+  }
+
+  getTeleaiInstanceForOwner(ownerId, id) {
+    const inst = this.state.teleaiInstances.find((i) => i.id === id && i.ownerId === ownerId);
+    return inst ? { ...inst } : null;
+  }
+
+  updateTeleaiInstance(id, patch = {}) {
+    const inst = this.state.teleaiInstances.find((i) => i.id === id);
+    if (!inst) return null;
+    for (const key of ['keepaliveEnabled', 'autoStart', 'clinkEnabled']) {
+      if (patch[key] !== undefined) inst[key] = Boolean(patch[key]);
+    }
+    for (const key of ['moveSec', 'kickWaitSec']) {
+      if (patch[key] !== undefined) {
+        const v = Number(patch[key]);
+        if (!Number.isFinite(v) || v < 0 || v > 86400) throw new Error(`${key} 取值超出范围`);
+        inst[key] = v;
+      }
+    }
+    if (patch.checkIntervalSec !== undefined) {
+      const v = Number(patch.checkIntervalSec);
+      if (!Number.isFinite(v) || v < 15 || v > 86400) throw new Error('巡检间隔需在 15~86400 秒');
+      inst.checkIntervalSec = v;
+    }
+    if (patch.connectURL !== undefined) {
+      inst.connectURL = patch.connectURL;
+      inst.connectURLAt = Date.now();
+    }
+    if (patch.lastStartAt !== undefined) inst.lastStartAt = patch.lastStartAt;
+    if (patch.lastError !== undefined) inst.lastError = patch.lastError;
+    if (patch.name !== undefined && String(patch.name).trim()) inst.name = String(patch.name).trim().slice(0, 40);
+    inst.updatedAt = Date.now();
+    this._save();
+    return { ...inst };
   }
 }
 

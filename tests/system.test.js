@@ -415,6 +415,20 @@ test('End-to-end multi-user isolation, official SMS login, x-workkey AES-GCM, ke
   assert.equal(loginSmsB.status, 200);
   assert.equal(loginSmsB.json.deviceCount, 1);
 
+  // 上游将默认保活策略改为 cycle（先等待再按需连接）；本用例验证长连接本身，显式切回 continuous
+  const devsForMode = await callApp('/api/dashboard', { token: tokenA });
+  await callApp(`/api/devices/${devsForMode.json.devices[0].id}/settings`, {
+    method: 'PATCH',
+    token: tokenA,
+    body: { keepaliveMode: 'continuous' },
+  });
+  const devsForModeB = await callApp('/api/dashboard', { token: tokenB });
+  await callApp(`/api/devices/${devsForModeB.json.devices[0].id}/settings`, {
+    method: 'PATCH',
+    token: tokenB,
+    body: { keepaliveMode: 'continuous' },
+  });
+
   // Wait 450ms for both Yun Engine.IO v3 & TCloud WebSocket keepalive handshakes + heartbeats
   await new Promise((r) => setTimeout(r, 450));
 

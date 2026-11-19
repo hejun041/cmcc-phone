@@ -6,6 +6,8 @@
     user: null,
     accounts: [],
     devices: [],
+    teleaiAccounts: [],
+    teleaiInstances: [],
     logs: [],
     pollTimer: null,
 
@@ -69,6 +71,13 @@
     if (h > 0) return `${h}时 ${m}分 ${r}秒`;
     if (m > 0) return `${m}分 ${r}秒`;
     return `${r}秒`;
+  }
+
+  function formatDateTime(ts) {
+    if (!ts) return '未知';
+    const d = new Date(ts);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
   }
 
   function formatTime(ts) {
@@ -182,9 +191,12 @@
       state.user = data.user;
       state.accounts = data.accounts || [];
       state.devices = data.devices || [];
+      state.teleaiAccounts = data.teleaiAccounts || [];
+      state.teleaiInstances = data.teleaiInstances || [];
       state.logs = data.logs || [];
       renderOverview();
       renderAccounts();
+      renderTeleaiAccounts();
       renderDevices();
       renderLogs();
     } catch (err) {
@@ -201,6 +213,8 @@
     $('kpiKeeping').textContent = String(keeping);
     const totalBeats = state.devices.reduce((acc, d) => acc + (d.runtime?.heartbeatCount || 0), 0);
     $('kpiHeartbeats').textContent = String(totalBeats);
+    const tl = $('kpiTeleai');
+    if (tl) tl.textContent = `${state.teleaiInstances.length} 台 / ${state.teleaiAccounts.length} 号`;
   }
 
   function renderAccounts() {
@@ -241,14 +255,113 @@
     return `<span class="badge badge-neutral"><span class="badge-dot"></span>${escapeHtml(rt.stateText || '空闲')}</span>`;
   }
 
+  function renderTeleaiAccounts() {
+    const list = $('teleaiAccountList');
+    if (!list) return;
+    if (state.teleaiAccounts.length === 0) {
+      list.innerHTML = `<div style="font-size:12px;color:var(--text-tertiary);padding:8px 0;">未绑定星辰智能体电脑账号，点击右上角「+ 绑定星辰电脑」</div>`;
+      return;
+    }
+    list.innerHTML = state.teleaiAccounts
+      .map((a) => {
+        const ok = a.authStatus === 'valid';
+        const badge = ok
+          ? `<span class="badge badge-success"><span class="badge-dot"></span>有效</span>`
+          : `<span class="badge badge-danger"><span class="badge-dot"></span>登录失效</span>`;
+        const exp = formatDateTime(a.tokenExpiresAt);
+        return `
+          <div class="account-pill">
+            <div class="account-info">
+              <div class="account-phone">${escapeHtml(a.loginName)} ${badge} <span class="badge badge-neutral">星辰电脑</span></div>
+              <div class="account-desc">${escapeHtml(a.remark || '未设置备注')} · Token 到期: ${exp}</div>
+            </div>
+            <div style="display:flex;gap:6px;">
+              <button class="btn btn-secondary btn-sm" data-act="tl-renew" data-id="${a.id}" data-login="${escapeHtml(a.loginName)}">一键续期</button>
+              <button class="btn btn-secondary btn-sm" data-act="tl-sync" data-id="${a.id}">同步</button>
+              <button class="btn btn-danger btn-sm" data-act="tl-unbind" data-id="${a.id}" data-login="${escapeHtml(a.loginName)}">解绑</button>
+            </div>
+          </div>
+        `;
+      })
+      .join('');
+  }
+
+  function teleaiCard(inst) {
+    const rt = inst.runtime || {};
+    const statusMap = {
+      ready: ['badge-success', '运行中'],
+      starting: ['badge-warning', '启动中'],
+      recycled: ['badge-neutral', '已回收'],
+      stopped: ['badge-neutral', '已关机'],
+      unknown: ['badge-neutral', '未知'],
+    };
+    const [cls, text] = statusMap[inst.stateText] || ['badge-neutral', inst.stateText || '未知'];
+    const cl = inst.clink;
+    const clinkBadge = !inst.clinkEnabled
+      ? '<span class="badge badge-neutral"><span class="badge-dot"></span>协议保活关闭</span>'
+      : cl && cl.state === 'running'
+        ? `<span class="badge badge-success"><span class="badge-dot"></span>CLINK 已连接</span>`
+        : cl && cl.state === 'paused'
+          ? '<span class="badge badge-warning"><span class="badge-dot"></span>会话被接管</span>'
+          : cl && cl.state === 'connecting'
+            ? '<span class="badge badge-warning"><span class="badge-dot"></span>CLINK 连接中</span>'
+            : `<span class="badge badge-danger"><span class="badge-dot"></span>CLINK ${escapeHtml((cl && cl.state) || '未启动')}</span>`;
+    const clinkStats = cl
+      ? `心跳 ${cl.channels?.MAIN?.heartbeats || 0} · 输入 ${cl.sentCount} · ACK ${cl.ackCount} · 重连 ${cl.reconnects}`
+      : '未建立桌面会话';
+    const rtBadge =
+      rt.state === 'AUTH_EXPIRED'
+        ? `<span class="badge badge-danger"><span class="badge-dot"></span>登录失效</span>`
+        : rt.state === 'STARTING'
+          ? `<span class="badge badge-warning"><span class="badge-dot"></span>开机中</span>`
+          : inst.keepaliveEnabled
+            ? `<span class="badge badge-success"><span class="badge-dot"></span>巡检保活中</span>`
+            : `<span class="badge badge-neutral"><span class="badge-dot"></span>保活关闭</span>`;
+    return `
+      <div class="device-card">
+        <div class="device-top">
+          <div>
+            <div class="device-title">${escapeHtml(inst.name)} <span class="badge badge-neutral" style="font-size:10px;">星辰电脑</span></div>
+            <div class="device-subtitle">${escapeHtml(inst.instanceId)} · ${escapeHtml(inst.accountLogin || '')}</div>
+          </div>
+          <div style="display:flex;gap:4px;flex-direction:column;align-items:flex-end;">
+            <span class="badge ${cls}"><span class="badge-dot"></span>${text}</span>
+            ${rtBadge}
+            ${clinkBadge}
+          </div>
+        </div>
+        <div class="device-stats">
+          <div class="device-stat-item">
+            <span class="device-stat-label">巡检次数</span>
+            <span class="device-stat-val">${rt.checks || 0} 次</span>
+          </div>
+          <div class="device-stat-item">
+            <span class="device-stat-label">自动开机</span>
+            <span class="device-stat-val">${inst.autoStart ? '开启' : '关闭'}</span>
+          </div>
+        </div>
+        <div class="device-schedule-text">CLINK: ${clinkStats}${cl && cl.nextRetryAt ? ` · ${Math.max(0, Math.round((cl.nextRetryAt - Date.now()) / 1000))}s 后重连` : ''}</div>
+        <div class="device-schedule-text">巡检间隔 ${inst.checkIntervalSec || 60}s${rt.lastRunAt ? ` · 上次巡检 ${formatTime(rt.lastRunAt)}` : ''}${inst.lastError ? ` · 异常: ${escapeHtml(inst.lastError)}` : ''}</div>
+        <div class="device-actions">
+          <button class="btn btn-primary btn-sm" data-act="tl-open" data-id="${inst.id}">进入控制</button>
+          <button class="btn btn-secondary btn-sm" data-act="tl-settings" data-id="${inst.id}">保活策略</button>
+          <button class="btn btn-secondary btn-sm" data-act="tl-power" data-id="${inst.id}" data-power="start">开机</button>
+          <button class="btn btn-secondary btn-sm" data-act="tl-power" data-id="${inst.id}" data-power="restart">重启</button>
+          <button class="btn btn-${inst.clinkEnabled ? 'danger' : 'secondary'} btn-sm" data-act="tl-clink" data-id="${inst.id}" data-clink="${inst.clinkEnabled ? 'stop' : 'start'}">${inst.clinkEnabled ? '停止协议保活' : '协议保活'}</button>
+        </div>
+      </div>
+    `;
+  }
+
   function renderDevices() {
     const grid = $('deviceGrid');
-    if (state.devices.length === 0) {
+    const teleaiHtml = state.teleaiInstances.map(teleaiCard).join('');
+    if (state.devices.length === 0 && state.teleaiInstances.length === 0) {
       grid.innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--text-tertiary);">名下暂无云手机实例，绑定账号后将自动拉取</div>`;
       return;
     }
 
-    grid.innerHTML = state.devices
+    grid.innerHTML = teleaiHtml + state.devices
       .map((d) => {
         const rt = d.runtime || {};
         const plat = String(d.platformType) === '2' ? 'T版' : '云版';
@@ -355,6 +468,34 @@
 
       if (act === 'open-web') {
         window.open('/control.html?device=' + encodeURIComponent(id), '_blank', 'noopener,noreferrer');
+      } else if (act === 'tl-open') {
+        await openTeleaiDesktop(id);
+      } else if (act === 'tl-settings') {
+        openTeleaiSettings(id);
+      } else if (act === 'tl-power') {
+        const power = btn.getAttribute('data-power') || 'start';
+        btn.disabled = true;
+        try {
+          const r = await api(`/api/teleai/instances/${id}/power`, { method: 'POST', body: { action: power } });
+          showToast(power === 'restart' ? '重启指令已下发' : '开机指令已下发');
+          await refreshDashboard(true);
+        } catch (err) {
+          showToast(err.message);
+        } finally {
+          btn.disabled = false;
+        }
+      } else if (act === 'tl-clink') {
+        const clinkAction = btn.getAttribute('data-clink') || 'start';
+        btn.disabled = true;
+        try {
+          await api(`/api/teleai/instances/${id}/clink`, { method: 'POST', body: { action: clinkAction } });
+          showToast(clinkAction === 'stop' ? '已停止协议保活' : '协议保活已启动');
+          await refreshDashboard(true);
+        } catch (err) {
+          showToast(err.message);
+        } finally {
+          btn.disabled = false;
+        }
       } else if (act === 'keep-settings') {
         openKeepaliveSettings(id);
       } else if (act === 'wakeup' || act === 'reboot') {
@@ -480,6 +621,146 @@
         showToast(err.message);
       }
     });
+ 
+    bindTeleaiEvents();
+  }
+
+  function bindTeleaiEvents() {
+    const modal = $('teleaiModal');
+    if (!modal) return;
+    $('addTeleaiBtn').addEventListener('click', () => modal.classList.remove('hidden'));
+    $('closeTeleaiBtn').addEventListener('click', () => modal.classList.add('hidden'));
+
+    $('submitTeleaiBtn').addEventListener('click', async () => {
+      const btn = $('submitTeleaiBtn');
+      const loginName = $('teleaiLoginName').value.trim();
+      const password = $('teleaiPassword').value;
+      const remark = $('teleaiRemark').value.trim();
+      if (!loginName || !password) return showToast('请填写星辰账号和密码');
+      btn.disabled = true;
+      btn.textContent = '登录中（自动过滑块）…';
+      try {
+        const res = await api('/api/teleai/login', { method: 'POST', body: { loginName, password, remark } });
+        showToast(`绑定成功，已同步 ${res.instanceCount} 台星辰电脑`);
+        modal.classList.add('hidden');
+        $('teleaiPassword').value = '';
+        await refreshDashboard(true);
+      } catch (err) {
+        showToast(err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '登录并同步实例';
+      }
+    });
+
+    $('teleaiAccountList').addEventListener('click', async (e) => {
+      const btn = e.target.closest('button[data-act]');
+      if (!btn) return;
+      const act = btn.getAttribute('data-act');
+      const id = btn.getAttribute('data-id');
+      if (act === 'tl-renew') {
+        btn.disabled = true;
+        btn.textContent = '续期中…';
+        try {
+          const r = await api(`/api/teleai/accounts/${id}/renew`, { method: 'POST' });
+          showToast(r.expiresAt ? `续期成功，有效期至 ${formatDateTime(r.expiresAt)}` : '续期成功');
+          await refreshDashboard(true);
+        } catch (err) {
+          showToast(err.message);
+        } finally {
+          btn.disabled = false;
+          btn.textContent = '一键续期';
+        }
+      } else if (act === 'tl-sync') {
+        btn.disabled = true;
+        try {
+          const r = await api(`/api/teleai/accounts/${id}/sync`, { method: 'POST' });
+          showToast(`同步成功，${r.instanceCount} 台实例`);
+          await refreshDashboard(true);
+        } catch (err) {
+          showToast(err.message);
+        } finally {
+          btn.disabled = false;
+        }
+      } else if (act === 'tl-unbind') {
+        const name = btn.getAttribute('data-login') || '';
+        if (!confirm(`确定解绑星辰账号 ${name} 并停止其巡检保活吗？`)) return;
+        try {
+          await api(`/api/teleai/accounts/${id}`, { method: 'DELETE' });
+          showToast('已解绑');
+          await refreshDashboard(true);
+        } catch (err) {
+          showToast(err.message);
+        }
+      }
+    });
+
+    $('closeTlSettingsBtn').addEventListener('click', () => $('tlSettingsModal').classList.add('hidden'));
+    $('tlSettingsCancelBtn').addEventListener('click', () => $('tlSettingsModal').classList.add('hidden'));
+    $('tlSettingsSaveBtn').addEventListener('click', async () => {
+      const id = $('tlSettingsModal').dataset.instanceId;
+      try {
+        await api(`/api/teleai/instances/${id}/settings`, {
+          method: 'PATCH',
+          body: {
+            keepaliveEnabled: $('tlKeepaliveInput').checked,
+            autoStart: $('tlAutoStartInput').checked,
+            checkIntervalSec: Number($('tlIntervalInput').value) || 60,
+            clinkEnabled: $('tlClinkInput').checked,
+            moveSec: Number($('tlMoveSecInput').value) || 30,
+            kickWaitSec: Number($('tlKickWaitInput').value),
+          },
+        });
+        $('tlSettingsModal').classList.add('hidden');
+        showToast('保活策略已更新');
+        await refreshDashboard(true);
+      } catch (err) {
+        showToast(err.message);
+      }
+    });
+
+    $('tlDesktopCloseBtn').addEventListener('click', () => {
+      $('tlDesktopFrame').src = 'about:blank';
+      $('tlDesktopModal').classList.add('hidden');
+    });
+    $('tlDesktopReloadBtn').addEventListener('click', () => openTeleaiDesktop($('tlDesktopModal').dataset.instanceId));
+    $('tlDesktopNewTabBtn').addEventListener('click', () => {
+      const url = $('tlDesktopModal').dataset.connectUrl;
+      if (url) window.open(url, '_blank', 'noopener,noreferrer');
+    });
+  }
+
+  function openTeleaiSettings(id) {
+    const inst = state.teleaiInstances.find((i) => i.id === id);
+    if (!inst) return;
+    const modal = $('tlSettingsModal');
+    modal.dataset.instanceId = id;
+    $('tlSettingsName').textContent = `${inst.name} (${inst.instanceId})`;
+    $('tlKeepaliveInput').checked = inst.keepaliveEnabled !== false;
+    $('tlAutoStartInput').checked = inst.autoStart !== false;
+    $('tlIntervalInput').value = inst.checkIntervalSec || 60;
+    $('tlClinkInput').checked = Boolean(inst.clinkEnabled);
+    $('tlMoveSecInput').value = inst.moveSec || 30;
+    $('tlKickWaitInput').value = inst.kickWaitSec === undefined ? 1800 : inst.kickWaitSec;
+    modal.classList.remove('hidden');
+  }
+
+  async function openTeleaiDesktop(id) {
+    const inst = state.teleaiInstances.find((i) => i.id === id);
+    const modal = $('tlDesktopModal');
+    modal.dataset.instanceId = id;
+    $('tlDesktopName').textContent = inst ? inst.name : '星辰电脑';
+    $('tlDesktopStatus').textContent = '正在获取入口…';
+    modal.classList.remove('hidden');
+    try {
+      const r = await api(`/api/teleai/instances/${id}/desktop`);
+      modal.dataset.connectUrl = r.connectURL || '';
+      $('tlDesktopFrame').src = r.connectURL || 'about:blank';
+      $('tlDesktopStatus').textContent = '已连接官方控制台';
+    } catch (err) {
+      $('tlDesktopStatus').textContent = err.message;
+      showToast(err.message);
+    }
   }
 
   async function loadCaptcha() {
