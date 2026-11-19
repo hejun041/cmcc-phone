@@ -779,3 +779,11 @@ html,body{background:#f5f7fb;color:#263349}.app-container{max-width:1120px;paddi
 .captcha-box > div:first-child { max-width: 100%; }
 .captcha-stage.yunzhi-captcha .captcha-bg { width: 100%; height: 100%; object-fit: fill; }
 .viewer-player-wrap iframe, .v-mount iframe { width: 100%; height: 100%; border: 0; }
+
+/* TeleAgent 卡片：动作按钮多，允许换行；列宽略放宽 */
+.device-card.teleai-card { grid-template-columns: minmax(180px, 1fr) 160px 330px; }
+.device-card .device-actions { flex-wrap: wrap; }
+.device-card .device-actions .btn { flex: 0 1 auto; white-space: nowrap; }
+@media (max-width: 700px) {
+  .device-card.teleai-card { grid-template-columns: 1fr; }
+}

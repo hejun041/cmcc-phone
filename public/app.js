@@ -357,7 +357,7 @@
             ? `<span class="badge badge-success"><span class="badge-dot"></span>巡检保活中</span>`
             : `<span class="badge badge-neutral"><span class="badge-dot"></span>保活关闭</span>`;
     return `
-      <div class="device-card">
+      <div class="device-card teleai-card">
         <div class="device-top">
           <div>
             <div class="device-title">${escapeHtml(inst.name)} <span class="badge badge-neutral" style="font-size:10px;">星辰电脑</span></div>
@@ -379,14 +379,13 @@
             <span class="device-stat-val">${inst.autoStart ? '开启' : '关闭'}</span>
           </div>
         </div>
-        <div class="device-schedule-text">CLINK: ${clinkStats}${cl && cl.nextRetryAt ? ` · ${Math.max(0, Math.round((cl.nextRetryAt - Date.now()) / 1000))}s 后重连` : ''}</div>
-        <div class="device-schedule-text">巡检间隔 ${inst.checkIntervalSec || 60}s${rt.lastRunAt ? ` · 上次巡检 ${formatTime(rt.lastRunAt)}` : ''}${inst.lastError ? ` · 异常: ${escapeHtml(inst.lastError)}` : ''}</div>
+        <div class="device-schedule-text">巡检 ${inst.checkIntervalSec || 60}s${rt.lastRunAt ? ` · 上次 ${formatTime(rt.lastRunAt)}` : ''} · CLINK ${clinkStats}${cl && cl.nextRetryAt ? ` · ${Math.max(0, Math.round((cl.nextRetryAt - Date.now()) / 1000))}s 后重连` : ''}${inst.lastError ? ` · 异常: ${escapeHtml(inst.lastError)}` : ''}</div>
         <div class="device-actions">
           <button class="btn btn-primary btn-sm" data-act="tl-open" data-id="${inst.id}">进入控制</button>
           <button class="btn btn-secondary btn-sm" data-act="tl-settings" data-id="${inst.id}">保活策略</button>
           <button class="btn btn-secondary btn-sm" data-act="tl-power" data-id="${inst.id}" data-power="start">开机</button>
           <button class="btn btn-secondary btn-sm" data-act="tl-power" data-id="${inst.id}" data-power="restart">重启</button>
-          <button class="btn btn-${inst.clinkEnabled ? 'danger' : 'secondary'} btn-sm" data-act="tl-clink" data-id="${inst.id}" data-clink="${inst.clinkEnabled ? 'stop' : 'start'}">${inst.clinkEnabled ? '停止协议保活' : '协议保活'}</button>
+          <button class="btn btn-${inst.clinkEnabled ? 'danger' : 'secondary'} btn-sm" data-act="tl-clink" data-id="${inst.id}" data-clink="${inst.clinkEnabled ? 'stop' : 'start'}">${inst.clinkEnabled ? '停协议保活' : '协议保活'}</button>
         </div>
       </div>
     `;
