@@ -7,9 +7,10 @@ const CMD_ACTION_PREPARE_CONNECT = 6056;
 const CMD_ACTION_HEART = 100022;
 
 class KeepaliveEngine {
-  constructor({ store, cmccClient, options = {} }) {
+  constructor({ store, cmccClient, yunzhiClient, options = {} }) {
     this.store = store;
     this.cmcc = cmccClient;
+    this.yunzhi = yunzhiClient;
     this.tokenCheckIntervalMs = options.tokenCheckIntervalMs || 20 * 60 * 1000;
     this.leaseSweepIntervalMs = options.leaseSweepIntervalMs || 5000;
     this.yunRefreshPulseMs = options.yunRefreshPulseMs || 4 * 60 * 1000;
@@ -98,6 +99,12 @@ class KeepaliveEngine {
       return;
     }
 
+    if (acc.provider === 'yunzhi' || dev.provider === 'yunzhi') {
+      this._stopDeviceWorker(deviceId);
+      this._ensureRuntime(dev).state = 'UNSUPPORTED';
+      return;
+    }
+
     if (!dev.keepaliveEnabled) {
       this._stopDeviceWorker(deviceId, '用户已关闭保活');
       return;
@@ -105,7 +112,7 @@ class KeepaliveEngine {
 
     const rt = this._ensureRuntime(dev);
     if (rt.powerHoldUntil > Date.now()) return;
-    if (dev.keepaliveMode !== 'continuous') {
+    if (dev.keepaliveMode === 'cycle') {
       const wait = (dev.waitMinutes || 5) * 60000;
       const connect = (dev.connectMinutes || 5) * 60000;
       const elapsed = Math.max(0, Date.now() - (dev.scheduleStartedAt || dev.updatedAt));
@@ -130,8 +137,8 @@ class KeepaliveEngine {
     const webControlled = Boolean(lease && lease.expiresAt > Date.now());
     if (!rt) {
       return {
-        state: webControlled ? 'WEB_CONTROL' : 'IDLE',
-        stateText: webControlled ? 'Web 实时控制中' : '未启动保活',
+        state: webControlled ? 'WEB_CONTROL' : this.store.getDeviceInternal(deviceId)?.provider === 'yunzhi' ? 'UNSUPPORTED' : 'IDLE',
+        stateText: webControlled ? 'Web 实时控制中' : this.store.getDeviceInternal(deviceId)?.provider === 'yunzhi' ? '云智渠道暂不支持后台保活' : '未启动保活',
         connectedSince: null,
         uptimeSeconds: 0,
         heartbeatCount: 0,
@@ -154,6 +161,7 @@ class KeepaliveEngine {
       RECONNECTING: '断线重连等待中',
       WEB_CONTROL: 'Web 实时控制接管中',
       ERROR: '连接异常',
+      UNSUPPORTED: '云智渠道暂不支持后台保活',
     };
     return {
       state: webControlled ? 'WEB_CONTROL' : rt.state,
@@ -189,6 +197,12 @@ class KeepaliveEngine {
       throw new Error('未找到该云手机设备或无权访问');
     }
     const existing = this.webLeases.get(deviceId);
+    if (dev.provider === 'yunzhi') {
+      if (!dev.capabilities?.stream) throw Object.assign(new Error('云智渠道暂不支持此操作'), { code: 'CAPABILITY_UNSUPPORTED', status: 501 });
+      if (!existing || existing.expiresAt <= Date.now()) {
+        throw Object.assign(new Error('云智控制会话已结束，请重新连接'), { code: 'CONTROL_SESSION_EXPIRED', status: 409 });
+      }
+    }
     const expiresAt = Date.now() + ttlMs;
     this.webLeases.set(deviceId, {
       ownerId,
@@ -214,7 +228,7 @@ class KeepaliveEngine {
         level: 'info',
         deviceId: dev.id,
         phoneName: dev.phoneName,
-        message: '已退出 Web 实时控制，恢复后台长期保活守护',
+        message: dev.provider === 'yunzhi' ? '已退出云智实时控制' : '已退出 Web 实时控制，恢复后台长期保活守护',
       });
     }
     this.reconcileDevice(deviceId);
@@ -237,7 +251,7 @@ class KeepaliveEngine {
             level: 'info',
             deviceId: dev.id,
             phoneName: dev.phoneName,
-            message: 'Web 控制窗口租约已结束，自动恢复后台长期保活',
+            message: dev.provider === 'yunzhi' ? '云智控制窗口租约已结束' : 'Web 控制窗口租约已结束，自动恢复后台长期保活',
           });
           this.reconcileDevice(deviceId);
         }
@@ -628,8 +642,17 @@ class KeepaliveEngine {
   async checkAllAccountTokens() {
     const accounts = this.store.getAllHydratedAccounts();
     for (const acc of accounts) {
-      if (!acc || acc.authStatus === 'expired') continue;
+      if (!acc || acc.authStatus === 'expired' || acc.pendingDelete) continue;
       try {
+        if (acc.provider === 'yunzhi') {
+          if (!this.yunzhi?.isConfigured()) continue;
+          const snapshot = await this.yunzhi.getAccountDevices(acc);
+          if (snapshot.account) this.store.upsertYunzhiAccount(acc.ownerId, { ...acc,
+            tokenExpiresAt: snapshot.account.tokenExpiresAt, capabilities: snapshot.account.capabilities,
+            authStatus: snapshot.account.authStatus });
+          this.store.syncDevicesForAccount(acc.ownerId, acc.id, snapshot.devices);
+          continue;
+        }
         const res = await this.cmcc.checkAndRefreshToken(acc);
         if (res.refreshed) {
           this.store.updateAccountTokens(acc.id, {
@@ -648,7 +671,11 @@ class KeepaliveEngine {
         const remoteDevs = await this.cmcc.listDevices(freshAcc);
         this.store.syncDevicesForAccount(acc.ownerId, acc.id, remoteDevs);
       } catch (err) {
-        if (err && err.code === 'CMCC_AUTH_EXPIRED') {
+        if (acc.provider === 'yunzhi' && err.code === 'ACCOUNT_DISABLED') this.store.updateAccountTokens(acc.id, { authStatus: 'disabled' });
+        if (acc.provider === 'yunzhi' && err.code !== 'YUNZHI_AUTH_EXPIRED') {
+          this.store.appendLog(acc.ownerId, { level: 'warn', message: '云智实例定期同步暂未完成，已保留上次列表' });
+        }
+        if (err && ['CMCC_AUTH_EXPIRED', 'YUNZHI_AUTH_EXPIRED'].includes(err.code)) {
           this.store.updateAccountTokens(acc.id, { authStatus: 'expired' });
           this.store.appendLog(acc.ownerId, {
             level: 'error',

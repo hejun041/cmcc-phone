@@ -4,6 +4,19 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+function providerCapabilities(provider, value = {}) {
+  if (provider !== 'yunzhi') {
+    return { stream: true, touch: true, power: ['wakeup', 'reboot'], screenshot: true, backgroundKeepalive: true };
+  }
+  return {
+    stream: value.stream === true,
+    touch: value.touch === true,
+    power: Array.isArray(value.power) ? value.power.filter((a) => ['wakeup', 'reboot', 'shutdown'].includes(a)) : [],
+    screenshot: value.screenshot === true,
+    backgroundKeepalive: false,
+  };
+}
+
 class MultiTenantStore {
   constructor(dataDir) {
     this.dataDir = dataDir;
@@ -12,15 +25,18 @@ class MultiTenantStore {
     this.dbPath = path.join(this.dataDir, 'store.json');
     this.masterKey = this._loadOrCreateMasterKey();
     this.state = {
+      installationId: crypto.randomUUID(),
       users: [],
       sessions: [],
       accounts: [],
       devices: [],
-      teleaiAccounts: [],
-      teleaiInstances: [],
     };
     this.logsByUser = new Map(); // userId -> array of log items (ring buffer)
     this._load();
+  }
+
+  get installationId() {
+    return this.state.installationId;
   }
 
   _loadOrCreateMasterKey() {
@@ -61,12 +77,16 @@ class MultiTenantStore {
     }
     try {
       const raw = JSON.parse(fs.readFileSync(this.dbPath, 'utf8'));
+      this.state.installationId = raw.installationId || this.state.installationId;
       this.state.users = Array.isArray(raw.users) ? raw.users : [];
       this.state.sessions = Array.isArray(raw.sessions) ? raw.sessions : [];
       this.state.accounts = Array.isArray(raw.accounts) ? raw.accounts : [];
       this.state.devices = Array.isArray(raw.devices) ? raw.devices : [];
-      this.state.teleaiAccounts = Array.isArray(raw.teleaiAccounts) ? raw.teleaiAccounts : [];
-      this.state.teleaiInstances = Array.isArray(raw.teleaiInstances) ? raw.teleaiInstances : [];
+      for (const account of this.state.accounts) account.provider = account.provider || 'cmcc';
+      for (const device of this.state.devices) {
+        device.provider = device.provider || this.state.accounts.find((a) => a.id === device.accountId)?.provider || 'cmcc';
+      }
+      if (!raw.installationId) this._save();
     } catch (err) {
       const backup = `${this.dbPath}.corrupt.${Date.now()}`;
       fs.copyFileSync(this.dbPath, backup);
@@ -241,7 +261,7 @@ class MultiTenantStore {
     const user = this.state.users.find((u) => u.id === ownerId);
     if (!user) throw new Error('所属平台用户不存在');
 
-    let acc = this.state.accounts.find((a) => a.ownerId === ownerId && a.mobile === mobile);
+    let acc = this.state.accounts.find((a) => a.ownerId === ownerId && a.mobile === mobile && (a.provider || 'cmcc') === 'cmcc');
     if (!acc) {
       const currentCount = this.state.accounts.filter((a) => a.ownerId === ownerId).length;
       if (currentCount >= user.maxAccounts) {
@@ -249,6 +269,7 @@ class MultiTenantStore {
       }
       acc = {
         id: crypto.randomUUID(),
+        provider: 'cmcc',
         ownerId,
         mobile,
         remark: remark || '',
@@ -276,6 +297,76 @@ class MultiTenantStore {
     return this.hydrateAccount(acc);
   }
 
+  importLegacyYunzhiAccounts(ownerId, metadata) {
+    const user = this.state.users.find((u) => u.id === ownerId && !u.disabled && u.role === 'admin');
+    const expectedOwner = `${this.installationId}:${ownerId}`;
+    if (!user || !metadata || typeof metadata !== 'object' || Array.isArray(metadata) || metadata.owner !== expectedOwner) {
+      throw new Error('原账号迁移归属不匹配');
+    }
+    const records = metadata.records;
+    if (!Array.isArray(records)) throw new Error('原账号迁移记录无效');
+    const previous = this.state.accounts;
+    const next = previous.map((account) => ({ ...account }));
+    const seen = new Set();
+    for (const record of records) {
+      const { remoteAccountId, displayName = '', mobile = '' } = record || {};
+      if (record?.sharedAccount !== true || !/^[A-Za-z0-9_-]{1,160}$/.test(remoteAccountId || '') ||
+          (mobile !== '' && !/^1[3-9]\d{9}$/.test(mobile)) || seen.has(remoteAccountId)) throw new Error('原账号迁移信息无效');
+      seen.add(remoteAccountId);
+      let account = next.find((a) => a.ownerId === ownerId && a.provider === 'yunzhi' && a.remoteAccountId === remoteAccountId);
+      if (account?.pendingDelete) throw new Error('账号正在解绑，不能迁移');
+      if (account && account.sharedAccount !== true) throw new Error('原账号引用已有非共享账号，拒绝迁移');
+      if (!account) {
+        if (mobile && next.some((a) => a.ownerId === ownerId && a.provider === 'yunzhi' && a.mobile === mobile)) throw new Error('迁移账号与已有绑定冲突');
+        account = { id: crypto.randomUUID(), ownerId, provider: 'yunzhi', createdAt: Date.now() };
+        next.push(account);
+      }
+      Object.assign(account, { remoteAccountId, mobile, displayName: String(displayName).slice(0, 80),
+        remark: account.remark || String(displayName).slice(0, 80), sharedAccount: true,
+        tokenEnc: '', hwTokenEnc: '', tokenExpiresAt: record.tokenExpiresAt ?? null,
+        capabilities: providerCapabilities('yunzhi', record.capabilities || account.capabilities),
+        authStatus: record.enabled === false ? 'disabled' : account.authStatus || 'valid', lastCheckAt: Date.now() });
+    }
+    if (next.filter((a) => a.ownerId === ownerId).length > user.maxAccounts) throw new Error('迁移后账号数量超过管理员配额上限');
+    this.state.accounts = next;
+    try { this._save(); } catch (err) { this.state.accounts = previous; throw err; }
+    return this.listAccountsByOwner(ownerId).filter((a) => a.provider === 'yunzhi');
+  }
+
+  upsertYunzhiAccount(ownerId, { mobile, remark = '', remoteAccountId, tokenExpiresAt = null, capabilities = {}, authStatus = 'valid', sharedAccount = false, displayName = '' }) {
+    const user = this.state.users.find((u) => u.id === ownerId && !u.disabled);
+    if (!user) throw new Error('所属平台用户不存在或已停用');
+    const byReference = this.state.accounts.find((a) => a.ownerId === ownerId && a.provider === 'yunzhi' && a.remoteAccountId === remoteAccountId);
+    if ((!/^1[3-9]\d{9}$/.test(String(mobile || '')) && !(mobile === '' && byReference?.sharedAccount)) || !remoteAccountId || String(remoteAccountId).length > 160) {
+      throw new Error('云智账号信息无效');
+    }
+    let acc = byReference || this.state.accounts.find((a) => a.ownerId === ownerId && a.mobile === mobile && a.provider === 'yunzhi');
+    if (acc?.pendingDelete) throw new Error('云智账号正在解绑，请先完成解绑');
+    const previous = acc ? { ...acc } : null;
+    if (!acc) {
+      if (this.state.accounts.filter((a) => a.ownerId === ownerId).length >= user.maxAccounts) {
+        throw new Error(`已达到当前用户可绑定官方账号上限 (${user.maxAccounts} 个)`);
+      }
+      acc = { id: crypto.randomUUID(), ownerId, mobile, provider: 'yunzhi', createdAt: Date.now() };
+      this.state.accounts.push(acc);
+    }
+    Object.assign(acc, {
+      mobile, sharedAccount: Boolean(acc.sharedAccount || sharedAccount),
+      displayName: String(displayName || acc.displayName || '').slice(0, 80),
+      remoteAccountId: String(remoteAccountId), remark: String(remark).slice(0, 80),
+      tokenExpiresAt, capabilities: providerCapabilities('yunzhi', capabilities),
+      tokenEnc: '', hwTokenEnc: '', authStatus: authStatus === 'expired' ? 'expired' : 'valid', lastCheckAt: Date.now(),
+    });
+    try {
+      this._save();
+    } catch (err) {
+      if (previous) Object.assign(acc, previous);
+      else this.state.accounts = this.state.accounts.filter((a) => a !== acc);
+      throw err;
+    }
+    return this.hydrateAccount(acc);
+  }
+
   updateAccountTokens(accountId, { token, hwToken, authStatus }) {
     const acc = this.state.accounts.find((a) => a.id === accountId);
     if (!acc) return null;
@@ -292,6 +383,13 @@ class MultiTenantStore {
     return {
       id: acc.id,
       ownerId: acc.ownerId,
+      provider: acc.provider || 'cmcc',
+      remoteAccountId: acc.remoteAccountId || '',
+      sharedAccount: Boolean(acc.sharedAccount),
+      displayName: acc.displayName || '',
+      pendingDelete: Boolean(acc.pendingDelete),
+      tokenExpiresAt: acc.tokenExpiresAt ?? null,
+      capabilities: providerCapabilities(acc.provider || 'cmcc', acc.capabilities),
       mobile: acc.mobile,
       remark: acc.remark || '',
       token: this.decryptSecret(acc.tokenEnc),
@@ -299,7 +397,7 @@ class MultiTenantStore {
       cmccUserId: acc.cmccUserId || '',
       province: acc.province || '',
       fingerprint: acc.fingerprint,
-      authStatus: acc.authStatus || 'valid',
+      authStatus: acc.pendingDelete ? 'deleting' : acc.authStatus || 'valid',
       lastCheckAt: acc.lastCheckAt,
       createdAt: acc.createdAt,
     };
@@ -309,11 +407,17 @@ class MultiTenantStore {
     return {
       id: acc.id,
       ownerId: acc.ownerId,
+      provider: acc.provider || 'cmcc',
+      sharedAccount: Boolean(acc.sharedAccount),
+      displayName: acc.displayName || '',
+      pendingDelete: Boolean(acc.pendingDelete),
+      tokenExpiresAt: acc.tokenExpiresAt ?? null,
+      capabilities: providerCapabilities(acc.provider || 'cmcc', acc.capabilities),
       mobile: acc.mobile,
       remark: acc.remark || '',
       cmccUserId: acc.cmccUserId || '',
       province: acc.province || '',
-      authStatus: acc.authStatus || 'valid',
+      authStatus: acc.pendingDelete ? 'deleting' : acc.authStatus || 'valid',
       lastCheckAt: acc.lastCheckAt,
       createdAt: acc.createdAt,
     };
@@ -337,21 +441,38 @@ class MultiTenantStore {
     return this.state.accounts.map((a) => this.hydrateAccount(a));
   }
 
+  setAccountPendingDelete(ownerId, accountId, pendingDelete) {
+    const account = this.state.accounts.find((a) => a.id === accountId && a.ownerId === ownerId && a.provider === 'yunzhi');
+    if (!account) throw new Error('未找到该云智账号或无权操作');
+    const previous = account.pendingDelete;
+    account.pendingDelete = Boolean(pendingDelete);
+    try { this._save(); } catch (err) { account.pendingDelete = previous; throw err; }
+  }
+
   deleteAccountForOwner(ownerId, accountId) {
     const idx = this.state.accounts.findIndex((a) => a.id === accountId && a.ownerId === ownerId);
-    if (idx === -1) throw new Error('未找到该移动账号或无权操作');
+    if (idx === -1) throw new Error('未找到该官方账号或无权操作');
+    const previousAccounts = [...this.state.accounts];
+    const previousDevices = [...this.state.devices];
     const removedDeviceIds = this.state.devices
       .filter((d) => d.accountId === accountId && d.ownerId === ownerId)
       .map((d) => d.id);
     this.state.accounts.splice(idx, 1);
     this.state.devices = this.state.devices.filter((d) => !(d.accountId === accountId && d.ownerId === ownerId));
-    this._save();
+    try { this._save(); }
+    catch (err) { this.state.accounts = previousAccounts; this.state.devices = previousDevices; throw err; }
     return { removedDeviceIds };
   }
 
   // ===== CloudPhone Devices (Strictly Scoped to ownerId) =====
 
   syncDevicesForAccount(ownerId, accountId, remoteDevices) {
+    const account = this.state.accounts.find((a) => a.id === accountId && a.ownerId === ownerId);
+    if (!account) throw new Error('未找到该账号或无权操作');
+    if (!Array.isArray(remoteDevices)) throw new Error('实例列表响应格式无效');
+    if (remoteDevices.some((d) => !d || !d.phoneId)) throw new Error('实例列表响应格式无效');
+    const previousDevices = this.state.devices.map((device) => ({ ...device }));
+    const provider = account.provider || 'cmcc';
     const now = Date.now();
     const seenIds = new Set();
     const updated = [];
@@ -366,9 +487,11 @@ class MultiTenantStore {
           id: crypto.randomUUID(),
           ownerId,
           accountId,
+          provider,
           phoneId: rd.phoneId,
           phoneName: rd.phoneName,
-          platformType: rd.platformType || '1',
+          platformType: provider === 'yunzhi' ? 'ctyun' : rd.platformType || '1',
+          capabilities: providerCapabilities(provider, rd.capabilities || account.capabilities),
           instanceStatus: rd.instanceStatus,
           validStatus: rd.validStatus,
           lockStatus: rd.lockStatus || 0,
@@ -376,9 +499,8 @@ class MultiTenantStore {
           expireStr: rd.expireStr || '',
           endTime: rd.endTime || '',
           specName: rd.specName || '',
-          keepaliveEnabled: true, // Default enable keepalive on newly synced cloud phones
-          keepaliveMode: 'cycle',
-          autoWakeup: true,
+          keepaliveEnabled: provider === 'cmcc',
+          autoWakeup: provider === 'cmcc',
           screenshotCache: '',
           screenshotUpdatedAt: null,
           updatedAt: now,
@@ -386,7 +508,10 @@ class MultiTenantStore {
         this.state.devices.push(dev);
       } else {
         dev.phoneName = rd.phoneName || dev.phoneName;
-        dev.platformType = rd.platformType || dev.platformType || '1';
+        dev.provider = provider;
+        dev.platformType = provider === 'yunzhi' ? 'ctyun' : rd.platformType || dev.platformType || '1';
+        dev.capabilities = providerCapabilities(provider, rd.capabilities || account.capabilities);
+        if (provider === 'yunzhi') { dev.keepaliveEnabled = false; dev.autoWakeup = false; }
         dev.instanceStatus = rd.instanceStatus;
         dev.validStatus = rd.validStatus;
         dev.lockStatus = rd.lockStatus || 0;
@@ -403,7 +528,8 @@ class MultiTenantStore {
     this.state.devices = this.state.devices.filter(
       (d) => !(d.ownerId === ownerId && d.accountId === accountId && !seenIds.has(d.phoneId))
     );
-    this._save();
+    try { this._save(); }
+    catch (err) { this.state.devices = previousDevices; throw err; }
     return updated;
   }
 
@@ -428,6 +554,9 @@ class MultiTenantStore {
   updateDeviceSettingsForOwner(ownerId, deviceId, patch = {}) {
     const dev = this.state.devices.find((d) => d.id === deviceId && d.ownerId === ownerId);
     if (!dev) throw new Error('未找到该云手机设备或无权操作');
+    if (dev.provider === 'yunzhi' && ['keepaliveEnabled', 'keepaliveMode', 'autoWakeup', 'waitMinutes', 'connectMinutes'].some((key) => patch[key] !== undefined)) {
+      throw new Error('云智渠道暂不支持后台长连接保活');
+    }
     if (patch.keepaliveEnabled !== undefined) dev.keepaliveEnabled = Boolean(patch.keepaliveEnabled);
     if (patch.autoWakeup !== undefined) dev.autoWakeup = Boolean(patch.autoWakeup);
     if (patch.keepaliveMode !== undefined) {
@@ -483,264 +612,6 @@ class MultiTenantStore {
   getLogsForOwner(ownerId, limit = 120) {
     const list = this.logsByUser.get(ownerId) || [];
     return list.slice(-limit).reverse();
-  }
-
-  /* ================= 星晨超级智能体电脑（TeleAgent）渠道 ================= */
-
-  static teleaiState(status, statusReason) {
-    const s = Number(status);
-    if (s === 3) return statusReason === 10 ? 'recycled' : 'stopped';
-    if (s === 100) return 'ready';
-    if (s === 0) return 'unknown';
-    return 'starting';
-  }
-
-  static teleaiStatusText(status, statusReason) {
-    const s = Number(status);
-    if (s === 3) return statusReason === 10 ? '已回收' : '已关机';
-    if (s === 100) return '运行中';
-    if (s === 5) return '排队中';
-    if (s === 2) return '创建中';
-    if (s === 4) return '初始化';
-    return '未知';
-  }
-
-  upsertTeleaiAccount(ownerId, { loginName, password, remark, operationToken, operToken, aesKey, aesIv, expiresAt }) {
-    const user = this.state.users.find((u) => u.id === ownerId);
-    if (!user) throw new Error('所属平台用户不存在');
-    const name = String(loginName || '').trim().toLowerCase();
-    if (!name) throw new Error('账号不能为空');
-
-    let acc = this.state.teleaiAccounts.find((a) => a.ownerId === ownerId && a.loginName === name);
-    const now = Date.now();
-    if (!acc) {
-      const total = this.state.accounts.filter((a) => a.ownerId === ownerId).length
-        + this.state.teleaiAccounts.filter((a) => a.ownerId === ownerId).length;
-      if (total >= user.maxAccounts) {
-        throw new Error(`已达到当前用户可绑定账号上限 (${user.maxAccounts} 个)`);
-      }
-      acc = {
-        id: crypto.randomUUID(),
-        ownerId,
-        channel: 'teleai',
-        loginName: name,
-        remark: remark || '',
-        operationTokenEnc: this.encryptSecret(operationToken || ''),
-        operTokenEnc: this.encryptSecret(operToken || ''),
-        aesKeyEnc: this.encryptSecret(aesKey || ''),
-        aesIv: aesIv || '',
-        tokenExpiresAt: expiresAt || null,
-        passwordEnc: password ? this.encryptSecret(password) : '',
-        authStatus: 'valid',
-        lastCheckAt: now,
-        lastRenewAt: now,
-        createdAt: now,
-      };
-      this.state.teleaiAccounts.push(acc);
-    } else {
-      if (remark !== undefined && remark !== '') acc.remark = remark;
-      if (operationToken) acc.operationTokenEnc = this.encryptSecret(operationToken);
-      if (operToken) acc.operTokenEnc = this.encryptSecret(operToken);
-      if (aesKey) acc.aesKeyEnc = this.encryptSecret(aesKey);
-      if (aesIv) acc.aesIv = aesIv;
-      if (expiresAt) acc.tokenExpiresAt = expiresAt;
-      if (password) acc.passwordEnc = this.encryptSecret(password);
-      acc.authStatus = 'valid';
-      acc.lastCheckAt = now;
-      acc.lastRenewAt = now;
-    }
-    this._save();
-    return this.hydrateTeleaiAccount(acc);
-  }
-
-  updateTeleaiAccountTokens(accountId, patch = {}) {
-    const acc = this.state.teleaiAccounts.find((a) => a.id === accountId);
-    if (!acc) return null;
-    if (patch.operationToken) acc.operationTokenEnc = this.encryptSecret(patch.operationToken);
-    if (patch.operToken !== undefined && patch.operToken !== '') acc.operTokenEnc = this.encryptSecret(patch.operToken);
-    if (patch.aesKey) acc.aesKeyEnc = this.encryptSecret(patch.aesKey);
-    if (patch.aesIv) acc.aesIv = patch.aesIv;
-    if (patch.expiresAt) acc.tokenExpiresAt = patch.expiresAt;
-    if (patch.password) acc.passwordEnc = this.encryptSecret(patch.password);
-    if (patch.authStatus) acc.authStatus = patch.authStatus;
-    if (patch.remark !== undefined) acc.remark = patch.remark;
-    acc.lastCheckAt = Date.now();
-    if (patch.renewed) acc.lastRenewAt = Date.now();
-    this._save();
-    return this.hydrateTeleaiAccount(acc);
-  }
-
-  hydrateTeleaiAccount(acc) {
-    if (!acc) return null;
-    return {
-      id: acc.id,
-      ownerId: acc.ownerId,
-      channel: 'teleai',
-      loginName: acc.loginName,
-      mobile: acc.loginName,
-      remark: acc.remark || '',
-      operationToken: this.decryptSecret(acc.operationTokenEnc),
-      operToken: this.decryptSecret(acc.operTokenEnc),
-      aesKey: this.decryptSecret(acc.aesKeyEnc),
-      aesIv: acc.aesIv || '',
-      password: this.decryptSecret(acc.passwordEnc),
-      hasPassword: Boolean(acc.passwordEnc),
-      tokenExpiresAt: acc.tokenExpiresAt || null,
-      authStatus: acc.authStatus || 'valid',
-      lastCheckAt: acc.lastCheckAt,
-      lastRenewAt: acc.lastRenewAt || null,
-      createdAt: acc.createdAt,
-    };
-  }
-
-  sanitizeTeleaiAccount(acc) {
-    const h = this.hydrateTeleaiAccount(acc);
-    if (!h) return null;
-    return {
-      id: h.id,
-      channel: 'teleai',
-      loginName: h.loginName,
-      mobile: h.loginName,
-      remark: h.remark,
-      hasPassword: h.hasPassword,
-      tokenExpiresAt: h.tokenExpiresAt,
-      authStatus: h.authStatus,
-      lastCheckAt: h.lastCheckAt,
-      lastRenewAt: h.lastRenewAt,
-      createdAt: h.createdAt,
-    };
-  }
-
-  listTeleaiAccountsByOwner(ownerId) {
-    return this.state.teleaiAccounts
-      .filter((a) => a.ownerId === ownerId)
-      .map((a) => this.sanitizeTeleaiAccount(a));
-  }
-
-  listAllTeleaiAccountsInternal() {
-    return this.state.teleaiAccounts.map((a) => this.hydrateTeleaiAccount(a));
-  }
-
-  getTeleaiAccountForOwner(ownerId, accountId) {
-    const acc = this.state.teleaiAccounts.find((a) => a.id === accountId && a.ownerId === ownerId);
-    return acc ? this.hydrateTeleaiAccount(acc) : null;
-  }
-
-  getTeleaiAccountInternal(accountId) {
-    const acc = this.state.teleaiAccounts.find((a) => a.id === accountId);
-    return acc ? this.hydrateTeleaiAccount(acc) : null;
-  }
-
-  deleteTeleaiAccountForOwner(ownerId, accountId) {
-    const before = this.state.teleaiAccounts.length;
-    this.state.teleaiAccounts = this.state.teleaiAccounts.filter(
-      (a) => !(a.id === accountId && a.ownerId === ownerId)
-    );
-    this.state.teleaiInstances = this.state.teleaiInstances.filter(
-      (i) => !(i.accountId === accountId && i.ownerId === ownerId)
-    );
-    const changed = before !== this.state.teleaiAccounts.length;
-    if (changed) this._save();
-    return changed;
-  }
-
-  syncTeleaiInstances(ownerId, accountId, remoteInstances) {
-    const now = Date.now();
-    const seen = new Set();
-    const out = [];
-    for (const ri of remoteInstances || []) {
-      if (!ri || !ri.id) continue;
-      seen.add(ri.id);
-      let inst = this.state.teleaiInstances.find(
-        (i) => i.ownerId === ownerId && i.accountId === accountId && i.instanceId === ri.id
-      );
-      const stateText = MultiTenantStore.teleaiState(ri.status, ri.statusReason);
-      if (!inst) {
-        inst = {
-          id: crypto.randomUUID(),
-          ownerId,
-          accountId,
-          channel: 'teleai',
-          instanceId: ri.id,
-          name: `星辰电脑 ${String(ri.id).slice(-6)}`,
-          status: Number(ri.status) || 0,
-          statusReason: Number(ri.statusReason) || 0,
-          stateText,
-          connectTimeout: ri.connectTimeout || 600,
-          keepaliveEnabled: true,
-          autoStart: true,
-          checkIntervalSec: 60,
-          clinkEnabled: false,
-          moveSec: 30,
-          kickWaitSec: 1800,
-          connectURL: '',
-          connectURLAt: null,
-          lastStartAt: null,
-          lastError: '',
-          updatedAt: now,
-        };
-        this.state.teleaiInstances.push(inst);
-      } else {
-        // 老数据兼容：补齐 CLINK 相关默认值
-        if (inst.clinkEnabled === undefined) inst.clinkEnabled = false;
-        if (inst.moveSec === undefined) inst.moveSec = 30;
-        if (inst.kickWaitSec === undefined) inst.kickWaitSec = 1800;
-        inst.status = Number(ri.status) || 0;
-        inst.statusReason = Number(ri.statusReason) || 0;
-        inst.stateText = stateText;
-        inst.connectTimeout = ri.connectTimeout || inst.connectTimeout;
-        inst.updatedAt = now;
-      }
-      out.push({ ...inst });
-    }
-    this.state.teleaiInstances = this.state.teleaiInstances.filter(
-      (i) => !(i.ownerId === ownerId && i.accountId === accountId && !seen.has(i.instanceId))
-    );
-    this._save();
-    return out;
-  }
-
-  listTeleaiInstancesByOwner(ownerId) {
-    return this.state.teleaiInstances.filter((i) => i.ownerId === ownerId).map((i) => ({ ...i }));
-  }
-
-  listAllTeleaiInstancesInternal() {
-    return this.state.teleaiInstances.map((i) => ({ ...i }));
-  }
-
-  getTeleaiInstanceForOwner(ownerId, id) {
-    const inst = this.state.teleaiInstances.find((i) => i.id === id && i.ownerId === ownerId);
-    return inst ? { ...inst } : null;
-  }
-
-  updateTeleaiInstance(id, patch = {}) {
-    const inst = this.state.teleaiInstances.find((i) => i.id === id);
-    if (!inst) return null;
-    for (const key of ['keepaliveEnabled', 'autoStart', 'clinkEnabled']) {
-      if (patch[key] !== undefined) inst[key] = Boolean(patch[key]);
-    }
-    for (const key of ['moveSec', 'kickWaitSec']) {
-      if (patch[key] !== undefined) {
-        const v = Number(patch[key]);
-        if (!Number.isFinite(v) || v < 0 || v > 86400) throw new Error(`${key} 取值超出范围`);
-        inst[key] = v;
-      }
-    }
-    if (patch.checkIntervalSec !== undefined) {
-      const v = Number(patch.checkIntervalSec);
-      if (!Number.isFinite(v) || v < 15 || v > 86400) throw new Error('巡检间隔需在 15~86400 秒');
-      inst.checkIntervalSec = v;
-    }
-    if (patch.connectURL !== undefined) {
-      inst.connectURL = patch.connectURL;
-      inst.connectURLAt = Date.now();
-    }
-    if (patch.lastStartAt !== undefined) inst.lastStartAt = patch.lastStartAt;
-    if (patch.lastError !== undefined) inst.lastError = patch.lastError;
-    if (patch.name !== undefined && String(patch.name).trim()) inst.name = String(patch.name).trim().slice(0, 40);
-    inst.updatedAt = Date.now();
-    this._save();
-    return { ...inst };
   }
 }
 

@@ -6,6 +6,8 @@
     platformType: '1',
     yunPlayer: null,
     tPlayer: null,
+    yunzhiPlayer: null,
+    generation: 0,
     muted: true,
     heartbeatTimer: null,
     closing: false,
@@ -66,37 +68,76 @@
         $('vName').textContent = dev.phoneName;
         document.title = `${dev.phoneName} · 云手机控制`;
         state.platformType = String(dev.platformType || '1');
+        setViewerProvider(dev.provider === 'yunzhi');
       }
     } catch (_) {}
-
-    // 保活租约心跳：控制期间后台保活让位
-    state.heartbeatTimer = setInterval(() => {
-      api(`/api/devices/${deviceId}/stream/heartbeat`, { method: 'POST' }).catch(() => {});
-    }, 20000);
 
     await connect();
   }
 
+  function stopHeartbeat() {
+    if (state.heartbeatTimer) clearInterval(state.heartbeatTimer);
+    state.heartbeatTimer = null;
+  }
+
+  function releaseFailedCloudViewer() {
+    stopHeartbeat();
+    api(`/api/devices/${deviceId}/stream/close`, { method: 'POST' }).catch(() => {});
+  }
+
   async function connect() {
+    const generation = ++state.generation;
+    stopHeartbeat();
     setStatus('正在获取官方串流凭证并协商视频通道…');
     $('vRtt').textContent = '-- ms';
     try {
       const res = await api(`/api/devices/${deviceId}/stream/open`, { method: 'POST', body: {} });
+      if (generation !== state.generation || state.closing) return;
+      state.heartbeatTimer = setInterval(() => {
+        api(`/api/devices/${deviceId}/stream/heartbeat`, { method: 'POST' }).catch((err) => {
+          if (err.status >= 400 && err.status < 500) stopHeartbeat();
+          if (err.status === 401) {
+            destroyPlayers();
+            setStatus('登录状态已失效，请先回工作台登录');
+            $('vHomeLink').classList.remove('hidden');
+          }
+        });
+      }, 20000);
       const stream = res.stream;
       if (res.device && res.device.phoneName) {
         $('vName').textContent = res.device.phoneName;
         document.title = `${res.device.phoneName} · 云手机控制`;
       }
       state.platformType = String(stream.platformType || (res.device && res.device.platformType) || state.platformType || '1');
-      $('vQuality').classList.toggle('hidden', state.platformType === '2');
-      if (state.platformType === '2') {
+      const isYunzhi = stream.provider === 'yunzhi';
+      $('vQuality').classList.toggle('hidden', isYunzhi || state.platformType === '2');
+      setViewerProvider(isYunzhi);
+      if (isYunzhi) {
+        const player = new window.YunzhiWebPlayer($('player'), stream, {
+          onState: setStatus,
+          onError: (text) => { releaseFailedCloudViewer(); setStatus(text); },
+          onDisconnected: releaseFailedCloudViewer,
+          onPlaying: () => { hideOverlay(); player.setMuted(state.muted); },
+        });
+        state.yunzhiPlayer = player;
+        player.start();
+      } else if (state.platformType === '2') {
         startTPlayer(stream);
       } else {
         startYunPlayer(stream);
       }
     } catch (err) {
-      setStatus(`连接云手机失败：${err.message}。可点击「重连」重试`);
+      if (generation === state.generation && !state.closing) {
+        stopHeartbeat();
+        setStatus(`连接云手机失败：${err.message}。可点击「重连」重试`);
+        if (err.status === 401) $('vHomeLink').classList.remove('hidden');
+      }
     }
+  }
+
+  function setViewerProvider(isYunzhi) {
+    for (const id of ['navTask', 'navHome', 'navBack', 'vRtt', 'vText', 'vSendText']) $(id).classList.toggle('hidden', isYunzhi);
+    document.querySelector('.v-dock').classList.toggle('hidden', isYunzhi);
   }
 
   /* ---------- 云版（官方 SDK） ---------- */
@@ -199,6 +240,8 @@
   }
 
   function destroyPlayers() {
+    state.generation++;
+    stopHeartbeat();
     if (state.yunPlayer) {
       try { state.yunPlayer.close(); state.yunPlayer.destroy(); } catch (_) {}
       state.yunPlayer = null;
@@ -206,6 +249,10 @@
     if (state.tPlayer) {
       try { state.tPlayer.destroy(); } catch (_) {}
       state.tPlayer = null;
+    }
+    if (state.yunzhiPlayer) {
+      state.yunzhiPlayer.destroy();
+      state.yunzhiPlayer = null;
     }
     $('player').innerHTML = '';
   }
@@ -233,6 +280,7 @@
       $('vMute').textContent = state.muted ? '静音中' : '声音开';
       if (state.yunPlayer) state.yunPlayer.setMuted(state.muted);
       if (state.tPlayer) state.tPlayer.setMuted(state.muted);
+      if (state.yunzhiPlayer) state.yunzhiPlayer.setMuted(state.muted);
     });
 
     $('vQuality').addEventListener('change', (e) => {
@@ -283,6 +331,7 @@
     $('vText').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendText(); });
 
     window.addEventListener('beforeunload', () => {
+      destroyPlayers();
       if (deviceId && !state.closing && navigator.sendBeacon) {
         navigator.sendBeacon(`/api/devices/${deviceId}/stream/close`, '{}');
       }
