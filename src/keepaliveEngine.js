@@ -559,7 +559,14 @@ class KeepaliveEngine {
         try {
           const parsed = JSON.parse(data);
           if (parsed && (parsed.code === 19009 || parsed.type === 6105)) {
+            // 服务端明确踢线：其他终端（官方 App / 网页控制 / 另一个实例）接管了这台云机
             rt.lastError = '云机在其他终端登录或被服务端断开';
+            const detail =
+              parsed.message && typeof parsed.message === 'object'
+                ? parsed.message.reason || parsed.message.code
+                : parsed.message;
+            rt.kickedAt = Date.now();
+            rt.kickedReason = String(detail || parsed.type || parsed.code || '');
           }
         } catch (_) {}
       }
@@ -572,7 +579,23 @@ class KeepaliveEngine {
 
     ws.on('close', (code, reason) => {
       if (gen !== rt.generation) return;
+      const kicked = rt.kickedAt && Date.now() - rt.kickedAt < 15000;
+      const kickedReason = rt.kickedReason || '';
+      rt.kickedAt = 0;
+      rt.kickedReason = '';
       this._cleanupSocketAndTimers(rt);
+      if (kicked) {
+        // 被接管时不要 3 秒重连：否则会和对方互相顶号，形成无限抢线
+        const waitSec = Number(dev.kickWaitSec) > 0 ? Number(dev.kickWaitSec) : 300;
+        this._scheduleReconnect(
+          dev,
+          rt,
+          gen,
+          `T版通道被其他终端接管${kickedReason ? `（${kickedReason}）` : ''}，暂停 ${Math.round(waitSec / 60)} 分钟`,
+          waitSec * 1000
+        );
+        return;
+      }
       this._scheduleReconnect(dev, rt, gen, `T版通道断开 (${code} ${reason || ''})`.trim());
     });
   }
