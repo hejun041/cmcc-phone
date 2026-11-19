@@ -84,9 +84,17 @@
     return `${r}秒`;
   }
 
+  // 云智渠道的到期时间是秒（控制桥口径），星辰渠道是毫秒；统一归一化，避免出现 58899 年
+  function toMillis(ts) {
+    const n = Number(ts) || 0;
+    if (!n) return 0;
+    return n > 1e12 ? n : n * 1000;
+  }
+
   function formatDateTime(ts) {
-    if (!ts) return '未知';
-    const d = new Date(ts);
+    const ms = toMillis(ts);
+    if (!ms) return '未知';
+    const d = new Date(ms);
     const pad = (n) => String(n).padStart(2, '0');
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
   }
@@ -257,7 +265,7 @@
             <div class="account-info">
               <div class="account-phone">${escapeHtml(a.mobile || a.displayName || '云智账号')} ${badge}${a.sharedAccount ? ' <span class="badge badge-neutral">青龙共享</span>' : ''}</div>
               <div class="account-desc">${escapeHtml(a.remark || '未设置备注')} · ${provider === 'yunzhi'
-                ? `登录到期：${a.tokenExpiresAt ? escapeHtml(new Date(a.tokenExpiresAt * 1000).toLocaleString('zh-CN', { hour12: false })) : '以官方状态为准'}`
+                ? `登录到期：${a.tokenExpiresAt ? escapeHtml(new Date(toMillis(a.tokenExpiresAt)).toLocaleString('zh-CN', { hour12: false })) : '以官方状态为准'}`
                 : `省份: ${escapeHtml(a.province || '自动')}`}</div>
               ${a.sharedAccount ? '<div class="account-desc">原青龙继续执行签到；解除关联保留原账号和凭据</div>' : ''}
             </div>
