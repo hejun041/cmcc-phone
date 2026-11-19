@@ -383,7 +383,11 @@ class MultiTenantStore {
       mobile, sharedAccount: Boolean(acc.sharedAccount || sharedAccount),
       displayName: String(displayName || acc.displayName || '').slice(0, 80),
       remoteAccountId: String(remoteAccountId), remark: String(remark).slice(0, 80),
-      tokenExpiresAt, capabilities: providerCapabilities('yunzhi', capabilities),
+      // 控制桥可能不返回到期时间：此时保留上一次已知值，避免 UI 显示 1970 年
+      tokenExpiresAt: Number.isFinite(tokenExpiresAt) && tokenExpiresAt > 0
+        ? tokenExpiresAt
+        : acc.tokenExpiresAt || null,
+      capabilities: providerCapabilities('yunzhi', capabilities),
       tokenEnc: '', hwTokenEnc: '', authStatus: authStatus === 'expired' ? 'expired' : 'valid', lastCheckAt: Date.now(),
     });
     try {
