@@ -44,6 +44,40 @@ function signMd5({ deviceType, requestId, tenantId = 0, timestamp, userId = 0, v
   return crypto.createHash('md5').update(raw, 'utf8').digest('hex').toUpperCase();
 }
 
+
+/**
+ * RSA PKCS#1 v1.5 私钥解密（纯 BigInt 实现）
+ * Node 20.12+/22 起默认禁用了 RSA_PKCS1_PADDING 的私钥解密（CVE-2023-46809），
+ * 容器里会报 "RSA_PKCS1_PADDING is no longer supported for private decryption"。
+ * 这里按 PKCS#1 v1.5 规范自己解，避免依赖 --security-revert 启动参数。
+ */
+function modPow(base, exp, mod) {
+  let result = 1n;
+  let b = base % mod;
+  let e = exp;
+  while (e > 0n) {
+    if (e & 1n) result = (result * b) % mod;
+    b = (b * b) % mod;
+    e >>= 1n;
+  }
+  return result;
+}
+
+function rsaDecryptPkcs1v15(privateKey, ciphertext) {
+  const jwk = privateKey.export({ format: 'jwk' });
+  const n = BigInt('0x' + Buffer.from(jwk.n, 'base64url').toString('hex'));
+  const d = BigInt('0x' + Buffer.from(jwk.d, 'base64url').toString('hex'));
+  const k = Math.ceil(n.toString(16).length / 2);
+  if (ciphertext.length !== k) throw new Error('ciphertext length mismatch');
+  const m = modPow(BigInt('0x' + ciphertext.toString('hex')), d, n);
+  const em = Buffer.from(m.toString(16).padStart(k * 2, '0'), 'hex');
+  // EM = 0x00 || 0x02 || PS(>=8, 非零) || 0x00 || M
+  if (em[0] !== 0x00 || em[1] !== 0x02) throw new Error('bad PKCS#1 v1.5 padding');
+  const sep = em.indexOf(0x00, 2);
+  if (sep < 10) throw new Error('bad PKCS#1 v1.5 padding length');
+  return em.subarray(sep + 1);
+}
+
 class CtyunClient {
   constructor(opts = {}) {
     Object.assign(this, DEFAULTS);
@@ -122,10 +156,14 @@ class CtyunClient {
     });
     const j = await r.json();
     if (j.code !== 0) throw new Error(`negotiationEncKey failed: ${JSON.stringify(j)}`);
-    const raw = crypto.privateDecrypt(
-      { key: privateKey, padding: crypto.constants.RSA_PKCS1_PADDING },
-      Buffer.from(j.data.encKey, 'base64')
-    );
+    const encKey = Buffer.from(j.data.encKey, 'base64');
+    let raw;
+    try {
+      // 优先自己解，规避 Node 新版对 RSA_PKCS1_PADDING 私钥解密的禁用
+      raw = rsaDecryptPkcs1v15(privateKey, encKey);
+    } catch (_) {
+      raw = crypto.privateDecrypt({ key: privateKey, padding: crypto.constants.RSA_PKCS1_PADDING }, encKey);
+    }
     const aesKey = raw.toString('utf8');
     if (Buffer.byteLength(aesKey) !== 32) throw new Error('unexpected AES key length');
     let info;
@@ -178,4 +216,4 @@ class CtyunClient {
   }
 }
 
-module.exports = { CtyunClient, randomDeviceCode, signMd5, aesEncrypt, aesDecrypt };
+module.exports = { CtyunClient, randomDeviceCode, signMd5, aesEncrypt, aesDecrypt, rsaDecryptPkcs1v15 };

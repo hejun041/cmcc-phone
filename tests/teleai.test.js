@@ -303,3 +303,24 @@ test('TeleAgent captcha: pure-JS PNG decode + puzzle solve', () => {
   assert.equal(solved.x, 4);
   assert.deepEqual(solved.size, [2, 2]);
 });
+
+test('ctyun: 纯 BigInt 的 PKCS#1 v1.5 解密（兼容 Node 禁用 RSA_PKCS1_PADDING 私钥解密）', () => {
+  const crypto = require('node:crypto');
+  const { rsaDecryptPkcs1v15, CtyunClient } = require('../src/teleai/ctyunClient');
+
+  assert.equal(typeof CtyunClient, 'function');
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    publicExponent: 0x10001,
+  });
+  const message = Buffer.from('0123456789abcdef0123456789abcdef'); // 32 字节 AES key
+  const cipher = crypto.publicEncrypt(
+    { key: publicKey, padding: crypto.constants.RSA_PKCS1_PADDING },
+    message
+  );
+  assert.equal(rsaDecryptPkcs1v15(privateKey, cipher).toString(), message.toString());
+
+  // 非 PKCS#1 v1.5 结构的密文必须被拒绝
+  const bogus = Buffer.alloc(cipher.length, 0x41);
+  assert.throws(() => rsaDecryptPkcs1v15(privateKey, bogus), /PKCS#1 v1\.5/);
+});
