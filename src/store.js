@@ -23,9 +23,12 @@ class MultiTenantStore {
     fs.mkdirSync(this.dataDir, { recursive: true });
     this.keyPath = path.join(this.dataDir, '.master.key');
     this.dbPath = path.join(this.dataDir, 'store.json');
+    // installationId 单独落一个文件：即使 store.json 被旧版本代码重写（旧版本没有该字段），
+    // 云智控制桥（青龙侧）按 installationId:ownerId 绑定账号，丢了就会全部 ACCOUNT_NOT_FOUND
+    this.installationIdPath = path.join(this.dataDir, 'installation.id');
     this.masterKey = this._loadOrCreateMasterKey();
     this.state = {
-      installationId: crypto.randomUUID(),
+      installationId: this._readInstallationId() || crypto.randomUUID(),
       users: [],
       sessions: [],
       accounts: [],
@@ -39,6 +42,25 @@ class MultiTenantStore {
 
   get installationId() {
     return this.state.installationId;
+  }
+
+  _readInstallationId() {
+    try {
+      if (!fs.existsSync(this.installationIdPath)) return '';
+      const id = fs.readFileSync(this.installationIdPath, 'utf8').trim();
+      return /^[A-Za-z0-9-]{8,64}$/.test(id) ? id : '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  _writeInstallationId(id) {
+    try {
+      if (this._readInstallationId() === id) return;
+      fs.writeFileSync(this.installationIdPath, id + '\n', { mode: 0o600 });
+    } catch (_) {
+      /* 只读卷等场景忽略 */
+    }
   }
 
   _loadOrCreateMasterKey() {
@@ -79,7 +101,9 @@ class MultiTenantStore {
     }
     try {
       const raw = JSON.parse(fs.readFileSync(this.dbPath, 'utf8'));
-      this.state.installationId = raw.installationId || this.state.installationId;
+      const fileId = this._readInstallationId();
+      this.state.installationId = fileId || raw.installationId || this.state.installationId;
+      this._writeInstallationId(this.state.installationId);
       this.state.users = Array.isArray(raw.users) ? raw.users : [];
       this.state.sessions = Array.isArray(raw.sessions) ? raw.sessions : [];
       this.state.accounts = Array.isArray(raw.accounts) ? raw.accounts : [];
@@ -99,6 +123,7 @@ class MultiTenantStore {
   }
 
   _save() {
+    this._writeInstallationId(this.state.installationId);
     const tmp = `${this.dbPath}.tmp.${process.pid}`;
     fs.writeFileSync(tmp, JSON.stringify(this.state, null, 2), { mode: 0o600 });
     fs.renameSync(tmp, this.dbPath);
