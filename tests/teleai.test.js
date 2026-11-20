@@ -324,3 +324,19 @@ test('ctyun: 纯 BigInt 的 PKCS#1 v1.5 解密（兼容 Node 禁用 RSA_PKCS1_PA
   const bogus = Buffer.alloc(cipher.length, 0x41);
   assert.throws(() => rsaDecryptPkcs1v15(privateKey, bogus), /PKCS#1 v1\.5/);
 });
+
+test('TeleAgent: 下发的同名空值 Cookie（清 agent 域）不能覆盖 .teleai.com.cn 上的 operationToken', () => {
+  const { CookieJar } = require('../src/teleaiClient');
+  const real = 'Em9xR4:eyJhbGciOiJIUzI1NiJ9.payload.sig';
+  const jar = new CookieJar();
+  // 与线上响应完全一致的三条 Set-Cookie
+  jar.add('https://agent.teleai.com.cn/superCowork/sapi/cowork/auth', [
+    `operationToken=${real}; max-age=2505599; domain=.teleai.com.cn; path=/; secure; SameSite=None`,
+    'operationToken=; expires=Thu, 01 Jan 1970 00:00:00 GMT; domain=agent.teleai.com.cn; path=/; secure; SameSite=None',
+    'operationToken=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; secure; SameSite=None',
+  ]);
+  assert.equal(jar.get('operationToken'), real);
+  // 同域同名的新值仍然要覆盖旧值
+  jar.add('https://agent.teleai.com.cn/', ['operationToken=NEW; domain=.teleai.com.cn; path=/']);
+  assert.equal(jar.get('operationToken'), 'NEW');
+});

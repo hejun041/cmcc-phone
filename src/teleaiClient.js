@@ -44,12 +44,17 @@ class CookieJar {
       const name = pair.slice(0, idx).trim();
       const value = pair.slice(idx + 1).trim();
       let domain = host;
+      let path = '/';
       for (const attr of attrs) {
         const [k, v] = attr.split('=');
         if (/^\s*domain$/i.test(k)) domain = String(v).trim().replace(/^\./, '');
+        if (/^\s*path$/i.test(k)) path = String(v).trim() || '/';
       }
-      this.items = this.items.filter((c) => !(c.name === name && c.domain === domain));
-      this.items.push({ name, value, domain });
+      // 浏览器按 name+domain+path 存储；服务端有时会补发同名「空值」Cookie 做清理，
+      // 只按 name+domain 去重会把刚拿到的有效值覆盖成空串（hejun044 的 NO_TOKEN 就是这么来的）
+      const same = this.items.find((c) => c.name === name && c.domain === domain && c.path === path);
+      if (same) same.value = value;
+      else this.items.push({ name, value, domain, path });
     }
   }
   header(url) {
@@ -61,7 +66,9 @@ class CookieJar {
   }
   get(name) {
     const hit = this.items.filter((c) => c.name === name);
-    return hit.length ? hit[hit.length - 1].value : null;
+    if (!hit.length) return null;
+    const nonEmpty = hit.filter((c) => c.value);
+    return (nonEmpty.length ? nonEmpty[nonEmpty.length - 1] : hit[hit.length - 1]).value || null;
   }
 }
 
@@ -333,4 +340,8 @@ class TeleaiClient {
   }
 }
 
-module.exports = { TeleaiClient, TeleaiAuthError, CLIENT_ID, REDIRECT_URI, AUTH_BASE, AGENT_BASE };
+// 供单测直接复用 CookieJar 的解析逻辑
+const __CookieJarAdd = CookieJar.prototype.add;
+const __CookieJarGet = CookieJar.prototype.get;
+
+module.exports = { TeleaiClient, TeleaiAuthError, CookieJar, __CookieJarAdd, __CookieJarGet, CLIENT_ID, REDIRECT_URI, AUTH_BASE, AGENT_BASE };
