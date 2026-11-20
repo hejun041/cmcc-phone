@@ -572,6 +572,44 @@ function createApp({
       }
     }
 
+    const tlRefreshMatch = pathname.match(/^\/api\/teleai\/instances\/([a-f0-9-]+)\/refresh$/i);
+    if (tlRefreshMatch && req.method === 'POST') {
+      const inst = store.getTeleaiInstanceForOwner(currentUser.id, tlRefreshMatch[1]);
+      if (!inst) return sendJson(res, 404, { ok: false, error: '未找到该星辰电脑实例或无权访问' });
+      const acc = store.getTeleaiAccountForOwner(currentUser.id, inst.accountId);
+      if (!acc) return sendJson(res, 404, { ok: false, error: '关联的星辰账号不存在' });
+      await teleaiClient.refreshInstance(acc, inst.instanceId);
+      store.updateTeleaiInstance(inst.id, { lastRefreshAt: Date.now() });
+      return sendJson(res, 200, { ok: true });
+    }
+
+    const tlHealthMatch = pathname.match(/^\/api\/teleai\/instances\/([a-f0-9-]+)\/health$/i);
+    if (tlHealthMatch && req.method === 'GET') {
+      const inst = store.getTeleaiInstanceForOwner(currentUser.id, tlHealthMatch[1]);
+      if (!inst) return sendJson(res, 404, { ok: false, error: '未找到该星辰电脑实例或无权访问' });
+      const acc = store.getTeleaiAccountForOwner(currentUser.id, inst.accountId);
+      if (!acc) return sendJson(res, 404, { ok: false, error: '关联的星辰账号不存在' });
+      const health = await teleaiClient.instanceInfo(acc, inst.instanceId);
+      const bad = [];
+      if (health && health.apiServer && health.apiServer !== 'READY') bad.push('apiServer');
+      if (health && health.relay && health.relay !== 'ONLINE') bad.push('relay');
+      store.updateTeleaiInstance(inst.id, { health, degraded: bad.length > 0 });
+      return sendJson(res, 200, { ok: true, health, degraded: bad.length > 0 });
+    }
+
+    const tlCheckinMatch = pathname.match(/^\/api\/teleai\/accounts\/([a-f0-9-]+)\/checkin$/i);
+    if (tlCheckinMatch && req.method === 'POST') {
+      const acc = store.getTeleaiAccountForOwner(currentUser.id, tlCheckinMatch[1]);
+      if (!acc) return sendJson(res, 404, { ok: false, error: '未找到该星辰账号或无权操作' });
+      const r = await teleaiClient.checkin(acc);
+      store.markTeleaiCheckin(acc.id, { ok: r.ok, message: r.ok ? '签到成功' : JSON.stringify(r.body).slice(0, 160) });
+      store.appendLog(currentUser.id, {
+        level: r.ok ? 'success' : 'warn',
+        message: `星辰账号 ${acc.loginName} 签到${r.ok ? '成功' : '未成功'}`,
+      });
+      return sendJson(res, 200, { ok: r.ok, body: r.body });
+    }
+
     const tlClinkMatch = pathname.match(/^\/api\/teleai\/instances\/([a-f0-9-]+)\/clink$/i);
     if (tlClinkMatch && req.method === 'POST') {
       const inst = store.getTeleaiInstanceForOwner(currentUser.id, tlClinkMatch[1]);

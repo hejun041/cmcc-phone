@@ -316,6 +316,7 @@
             </div>
             <div style="display:flex;gap:6px;">
               <button class="btn btn-secondary btn-sm" data-act="tl-renew" data-id="${a.id}" data-login="${escapeHtml(a.loginName)}">一键续期</button>
+              <button class="btn btn-secondary btn-sm" data-act="tl-checkin" data-id="${a.id}" data-login="${escapeHtml(a.loginName)}">签到</button>
               <button class="btn btn-secondary btn-sm" data-act="tl-sync" data-id="${a.id}">同步</button>
               <button class="btn btn-danger btn-sm" data-act="tl-unbind" data-id="${a.id}" data-login="${escapeHtml(a.loginName)}">解绑</button>
             </div>
@@ -345,6 +346,9 @@
           : cl && cl.state === 'connecting'
             ? '<span class="badge badge-warning"><span class="badge-dot"></span>CLINK 连接中</span>'
             : `<span class="badge badge-danger"><span class="badge-dot"></span>CLINK ${escapeHtml((cl && cl.state) || '未启动')}</span>`;
+    const degradedBadge = inst.degraded
+      ? '<span class="badge badge-danger"><span class="badge-dot"></span>组件未就绪</span>'
+      : '';
     const clinkStats = cl
       ? `心跳 ${cl.channels?.MAIN?.heartbeats || 0} · 输入 ${cl.sentCount} · ACK ${cl.ackCount} · 重连 ${cl.reconnects}`
       : '未建立桌面会话';
@@ -367,6 +371,7 @@
             <span class="badge ${cls}"><span class="badge-dot"></span>${text}</span>
             ${rtBadge}
             ${clinkBadge}
+            ${degradedBadge}
           </div>
         </div>
         <div class="device-stats">
@@ -379,7 +384,7 @@
             <span class="device-stat-val">${inst.autoStart ? '开启' : '关闭'}</span>
           </div>
         </div>
-        <div class="device-schedule-text">巡检 ${inst.checkIntervalSec || 60}s${rt.lastRunAt ? ` · 上次 ${formatTime(rt.lastRunAt)}` : ''} · CLINK ${clinkStats}${cl && cl.nextRetryAt ? ` · ${Math.max(0, Math.round((cl.nextRetryAt - Date.now()) / 1000))}s 后重连` : ''}${inst.lastError ? ` · 异常: ${escapeHtml(inst.lastError)}` : ''}</div>
+        <div class="device-schedule-text">巡检 ${inst.checkIntervalSec || 60}s${inst.lastRefreshAt ? ` · 信标 ${Math.max(0, Math.round((Date.now() - inst.lastRefreshAt) / 1000))}s 前` : ''} · CLINK ${clinkStats}${cl && cl.nextRetryAt ? ` · ${Math.max(0, Math.round((cl.nextRetryAt - Date.now()) / 1000))}s 后重连` : ''}${inst.health ? ` · api ${escapeHtml(inst.health.apiServer)} / local ${escapeHtml(inst.health.localStatus)} / relay ${escapeHtml(inst.health.relay)}` : ''}${inst.lastError ? ` · 异常: ${escapeHtml(inst.lastError)}` : ''}</div>
         <div class="device-actions">
           <button class="btn btn-primary btn-sm" data-act="tl-open" data-id="${inst.id}">进入控制</button>
           <button class="btn btn-secondary btn-sm" data-act="tl-settings" data-id="${inst.id}">保活策略</button>
@@ -816,6 +821,17 @@
           btn.disabled = false;
           btn.textContent = '一键续期';
         }
+      } else if (act === 'tl-checkin') {
+        btn.disabled = true;
+        try {
+          const r = await api(`/api/teleai/accounts/${id}/checkin`, { method: 'POST' });
+          showToast(r.ok ? '签到成功' : '签到未成功，请稍后再试');
+          await refreshDashboard(true);
+        } catch (err) {
+          showToast(err.message);
+        } finally {
+          btn.disabled = false;
+        }
       } else if (act === 'tl-sync') {
         btn.disabled = true;
         try {
@@ -851,6 +867,7 @@
             keepaliveEnabled: $('tlKeepaliveInput').checked,
             autoStart: $('tlAutoStartInput').checked,
             checkIntervalSec: Number($('tlIntervalInput').value) || 60,
+            refreshEnabled: $('tlRefreshInput') ? $('tlRefreshInput').checked : true,
             clinkEnabled: $('tlClinkInput').checked,
             moveSec: Number($('tlMoveSecInput').value) || 30,
             kickWaitSec: Number($('tlKickWaitInput').value),
@@ -885,6 +902,7 @@
     $('tlAutoStartInput').checked = inst.autoStart !== false;
     $('tlIntervalInput').value = inst.checkIntervalSec || 60;
     $('tlClinkInput').checked = Boolean(inst.clinkEnabled);
+    if ($('tlRefreshInput')) $('tlRefreshInput').checked = inst.refreshEnabled !== false;
     $('tlMoveSecInput').value = inst.moveSec || 30;
     $('tlKickWaitInput').value = inst.kickWaitSec === undefined ? 1800 : inst.kickWaitSec;
     modal.classList.remove('hidden');

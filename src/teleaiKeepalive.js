@@ -113,18 +113,52 @@ class TeleaiKeepaliveEngine {
         rt.state = 'KEEPING';
         return;
       }
-      if (fresh.status === 3) {
-        if (fresh.autoStart) {
-          rt.state = 'STARTING';
-          this.log(fresh.ownerId, `实例 ${fresh.instanceId.slice(-6)} 已回收，自动开机中…`, 'info', fresh.id, fresh.name);
-          await this.client.instanceAction(acc, 'start', fresh.instanceId);
-          this.store.updateTeleaiInstance(fresh.id, { lastStartAt: Date.now(), lastError: '' });
-          rt.starts += 1;
-          this.log(fresh.ownerId, `实例 ${fresh.instanceId.slice(-6)} 开机指令已下发`, 'success', fresh.id, fresh.name);
-        } else {
-          this.log(fresh.ownerId, `实例 ${fresh.instanceId.slice(-6)} 已回收（未开启自动开机）`, 'warn', fresh.id, fresh.name);
+
+      const status = Number(fresh.status);
+      const running = status === 4 || status === 100;
+
+      if (running) {
+        // ① 活跃信标：前端在每次文件操作前都会调 instance/refresh，这才是重置「长时间未活跃」的东西
+        if (fresh.refreshEnabled) {
+          try {
+            await this.client.refreshInstance(acc, fresh.instanceId);
+            this.store.updateTeleaiInstance(fresh.id, { lastRefreshAt: Date.now() });
+          } catch (e) {
+            if (e && e.code === '4001') throw e;
+            rt.lastError = `refresh 失败：${e.message}`;
+          }
         }
+        // ② 每 5 轮做一次四路健康诊断，识别「status=100 但组件没 READY」的假活
+        rt.healthTick = (rt.healthTick || 0) + 1;
+        if (rt.healthTick % 5 === 1) {
+          const health = await this.client.instanceInfo(acc, fresh.instanceId).catch(() => null);
+          if (health) {
+            // 只有 apiServer / relay 异常才算"假活"；localStatus 常见 INIT（agent 侧状态），仅作展示
+            const bad = [];
+            if (health.apiServer && health.apiServer !== 'READY') bad.push('apiServer');
+            if (health.relay && health.relay !== 'ONLINE') bad.push('relay');
+            this.store.updateTeleaiInstance(fresh.id, { health, degraded: bad.length > 0 });
+            if (bad.length && !rt.degradedLogged) {
+              rt.degradedLogged = true;
+              this.log(fresh.ownerId, `实例 ${fresh.instanceId.slice(-6)} 组件未就绪（${bad.join('/')}），建议重启`, 'warn', fresh.id, fresh.name);
+            }
+            if (!bad.length) rt.degradedLogged = false;
+          }
+        }
+      } else if (fresh.autoStart) {
+        rt.state = 'STARTING';
+        this.log(fresh.ownerId, `实例 ${fresh.instanceId.slice(-6)} 状态 ${status}，自动开机中…`, 'info', fresh.id, fresh.name);
+        await this.client.instanceAction(acc, 'start', fresh.instanceId);
+        this.store.updateTeleaiInstance(fresh.id, { lastStartAt: Date.now(), lastError: '' });
+        rt.starts += 1;
+        this.log(fresh.ownerId, `实例 ${fresh.instanceId.slice(-6)} 开机指令已下发`, 'success', fresh.id, fresh.name);
+      } else {
+        this.log(fresh.ownerId, `实例 ${fresh.instanceId.slice(-6)} 状态 ${status}（未开启自动开机）`, 'warn', fresh.id, fresh.name);
       }
+
+      // ③ 每日签到（幂等，一天只发一次）
+      await this.maybeCheckin(acc);
+
       rt.state = 'KEEPING';
       rt.lastError = '';
     } catch (err) {
@@ -138,6 +172,21 @@ class TeleaiKeepaliveEngine {
         rt.lastError = String((err && err.message) || err);
         this.store.updateTeleaiInstance(inst.id, { lastError: rt.lastError });
       }
+    }
+  }
+
+  /** 每日签到：同一账号每天只发一次，失败次日重试 */
+  async maybeCheckin(acc) {
+    const last = acc.lastCheckinAt ? new Date(acc.lastCheckinAt) : null;
+    const today = new Date();
+    if (last && last.toDateString() === today.toDateString() && acc.lastCheckinOk) return;
+    try {
+      const r = await this.client.checkin(acc);
+      this.store.markTeleaiCheckin(acc.id, { ok: r.ok, message: r.ok ? '签到成功' : JSON.stringify(r.body).slice(0, 160) });
+      if (r.ok) this.log(acc.ownerId, `账号 ${acc.loginName} 每日签到完成`, 'success');
+    } catch (e) {
+      if (e && e.code === '4001') throw e;
+      this.store.markTeleaiCheckin(acc.id, { ok: false, message: e.message });
     }
   }
 }

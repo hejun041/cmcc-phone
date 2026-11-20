@@ -715,6 +715,16 @@ class MultiTenantStore {
     return this.hydrateTeleaiAccount(acc);
   }
 
+  markTeleaiCheckin(accountId, { ok = true, message = '' } = {}) {
+    const acc = this.state.teleaiAccounts.find((a) => a.id === accountId);
+    if (!acc) return null;
+    acc.lastCheckinAt = Date.now();
+    acc.lastCheckinOk = Boolean(ok);
+    acc.lastCheckinMessage = String(message || '').slice(0, 200);
+    this._save();
+    return this.hydrateTeleaiAccount(acc);
+  }
+
   updateTeleaiAccountTokens(accountId, patch = {}) {
     const acc = this.state.teleaiAccounts.find((a) => a.id === accountId);
     if (!acc) return null;
@@ -751,6 +761,9 @@ class MultiTenantStore {
       authStatus: acc.authStatus || 'valid',
       lastCheckAt: acc.lastCheckAt,
       lastRenewAt: acc.lastRenewAt || null,
+      lastCheckinAt: acc.lastCheckinAt || null,
+      lastCheckinOk: acc.lastCheckinOk === undefined ? null : acc.lastCheckinOk,
+      lastCheckinMessage: acc.lastCheckinMessage || '',
       createdAt: acc.createdAt,
     };
   }
@@ -769,6 +782,9 @@ class MultiTenantStore {
       authStatus: h.authStatus,
       lastCheckAt: h.lastCheckAt,
       lastRenewAt: h.lastRenewAt,
+      lastCheckinAt: h.lastCheckinAt,
+      lastCheckinOk: h.lastCheckinOk,
+      lastCheckinMessage: h.lastCheckinMessage,
       createdAt: h.createdAt,
     };
   }
@@ -835,6 +851,10 @@ class MultiTenantStore {
           clinkEnabled: false,
           moveSec: 30,
           kickWaitSec: 1800,
+          refreshEnabled: true,
+          lastRefreshAt: null,
+          health: null,
+          degraded: false,
           connectURL: '',
           connectURLAt: null,
           lastStartAt: null,
@@ -847,6 +867,9 @@ class MultiTenantStore {
         if (inst.clinkEnabled === undefined) inst.clinkEnabled = false;
         if (inst.moveSec === undefined) inst.moveSec = 30;
         if (inst.kickWaitSec === undefined) inst.kickWaitSec = 1800;
+        if (inst.refreshEnabled === undefined) inst.refreshEnabled = true;
+        if (inst.health === undefined) inst.health = null;
+        if (inst.degraded === undefined) inst.degraded = false;
         inst.status = Number(ri.status) || 0;
         inst.statusReason = Number(ri.statusReason) || 0;
         inst.stateText = stateText;
@@ -878,7 +901,7 @@ class MultiTenantStore {
   updateTeleaiInstance(id, patch = {}) {
     const inst = this.state.teleaiInstances.find((i) => i.id === id);
     if (!inst) return null;
-    for (const key of ['keepaliveEnabled', 'autoStart', 'clinkEnabled']) {
+    for (const key of ['keepaliveEnabled', 'autoStart', 'clinkEnabled', 'refreshEnabled']) {
       if (patch[key] !== undefined) inst[key] = Boolean(patch[key]);
     }
     for (const key of ['moveSec', 'kickWaitSec']) {
@@ -898,6 +921,9 @@ class MultiTenantStore {
       inst.connectURLAt = Date.now();
     }
     if (patch.lastStartAt !== undefined) inst.lastStartAt = patch.lastStartAt;
+    if (patch.lastRefreshAt !== undefined) inst.lastRefreshAt = patch.lastRefreshAt;
+    if (patch.health !== undefined) inst.health = patch.health;
+    if (patch.degraded !== undefined) inst.degraded = Boolean(patch.degraded);
     if (patch.lastError !== undefined) inst.lastError = patch.lastError;
     if (patch.name !== undefined && String(patch.name).trim()) inst.name = String(patch.name).trim().slice(0, 40);
     inst.updatedAt = Date.now();

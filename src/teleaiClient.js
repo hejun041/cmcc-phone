@@ -331,6 +331,46 @@ class TeleaiClient {
     return { ok: true, instances: list };
   }
 
+  /**
+   * 活跃信标：前端在每次文件操作（listFiles/upload/deleteFile…）前都会 fire-and-forget 调它，
+   * 是重置「长时间未活跃」计时的东西（对照 teleagent_keepalive.py 的结论，已实测 code:0）。
+   */
+  async refreshInstance(acc, instanceId) {
+    return this.instanceAction(acc, 'refresh', instanceId);
+  }
+
+  /** 内部诊断接口：返回 apiServer / localStatus / queue / relay 四路健康 */
+  async instanceInfo(acc, instanceId) {
+    const res = await this._fetch(
+      `${AGENT_BASE}/teleagent-manager/v1/instance/info?id=${encodeURIComponent(instanceId)}`,
+      { headers: this._agentHeaders(acc) }
+    );
+    const data = this._unwrap(res, 'info');
+    if (!data || typeof data !== 'object') return null;
+    return {
+      cluster: data.clusterId || '',
+      status: data.status,
+      description: data.statusDescription || '',
+      apiServer: (data.apiServer && data.apiServer.status) || '',
+      localStatus: (data.localStatus && data.localStatus.status) || '',
+      queue: (data.queue && data.queue.status) || '',
+      relay: (data.relay && data.relay.status) || '',
+    };
+  }
+
+  /** 每日签到（幂等，重复调用只返回 code:200） */
+  async checkin(acc) {
+    const res = await this._fetch(
+      `${AGENT_BASE}/superCowork/sapi/user/portal/companyStore/checkTask?type=daily_login`,
+      { headers: this._agentHeaders(acc) }
+    );
+    const body = res.json || {};
+    if (res.status === 401 || String(body.code) === '4001') {
+      throw new TeleaiAuthError('云端登录已失效，请重新登录', '4001');
+    }
+    return { ok: body.code === 200 || body.message === 'success' || body.msg === 'success', body };
+  }
+
   /** 服务状态（可选，用于探活） */
   async serviceStatus(acc) {
     const res = await this._fetch(`${AGENT_BASE}/teleagent-manager/v1/service/status`, {
