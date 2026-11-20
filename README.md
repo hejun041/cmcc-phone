@@ -78,6 +78,19 @@ POST .../clink {action:"stop"} → 三通道干净关闭
 - 协议级保活依赖浏览器侧同款 TLS/WS 环境（`deskmsgz`/`jsyz...deskmgr` 网关），内网或断网环境连不上会进 error 并指数退避。
 - 绑定/续期会真实产生一次官方登录，短时间内重复操作会累加失败计数，请勿用来试密码。
 
+## 一键发布（NAS 部署）
+
+```bash
+sh scripts/sync-and-deploy.sh            # 自动打 tag：cmcc-phone:deploy-<时间戳>
+sh scripts/sync-and-deploy.sh my-tag     # 指定镜像 tag
+```
+
+流程：`git fetch`（镜像优先，origin 兜底）→ `docker build` → 备份 compose 并切换镜像 →
+`docker compose up -d` → 等待健康检查 → 打印容器状态与 `/api/health`。
+
+可用 `SRC` / `APP` / `MIRROR` / `SERVICE` / `HEALTH_URL` 覆盖默认路径。国内直连
+`github.com` 经常超时时，脚本会走 `MIRROR`（默认 `https://ghfast.top/`）。
+
 ## 启动方式
 
 ```bash
