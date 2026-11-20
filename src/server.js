@@ -597,6 +597,22 @@ function createApp({
       return sendJson(res, 200, { ok: true, health, degraded: bad.length > 0 });
     }
 
+    const tlAutoRenewMatch = pathname.match(/^\/api\/teleai\/accounts\/([a-f0-9-]+)\/autorenew$/i);
+    if (tlAutoRenewMatch && req.method === 'PATCH') {
+      const acc = store.getTeleaiAccountForOwner(currentUser.id, tlAutoRenewMatch[1]);
+      if (!acc) return sendJson(res, 404, { ok: false, error: '未找到该星辰账号或无权操作' });
+      const body = await readJsonBody(req);
+      const updated = store.setTeleaiAutoRenew(acc.id, {
+        enabled: body.enabled,
+        days: body.days,
+      });
+      store.appendLog(currentUser.id, {
+        level: 'info',
+        message: `星辰账号 ${acc.loginName} 自动续期：${updated.autoRenewEnabled ? `开启（剩余 ${updated.autoRenewDays} 天前触发）` : '关闭'}`,
+      });
+      return sendJson(res, 200, { ok: true, account: store.listTeleaiAccountsByOwner(currentUser.id).find((a) => a.id === acc.id) });
+    }
+
     const tlCheckinMatch = pathname.match(/^\/api\/teleai\/accounts\/([a-f0-9-]+)\/checkin$/i);
     if (tlCheckinMatch && req.method === 'POST') {
       const acc = store.getTeleaiAccountForOwner(currentUser.id, tlCheckinMatch[1]);

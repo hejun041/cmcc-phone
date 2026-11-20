@@ -694,6 +694,11 @@ class MultiTenantStore {
         tokenExpiresAt: expiresAt || null,
         passwordEnc: password ? this.encryptSecret(password) : '',
         authStatus: 'valid',
+        autoRenewEnabled: true,
+        autoRenewDays: 2,
+        lastAutoRenewAt: null,
+        lastAutoRenewOk: null,
+        lastAutoRenewMessage: '',
         lastCheckAt: now,
         lastRenewAt: now,
         createdAt: now,
@@ -711,6 +716,29 @@ class MultiTenantStore {
       acc.lastCheckAt = now;
       acc.lastRenewAt = now;
     }
+    this._save();
+    return this.hydrateTeleaiAccount(acc);
+  }
+
+  setTeleaiAutoRenew(accountId, { enabled, days } = {}) {
+    const acc = this.state.teleaiAccounts.find((a) => a.id === accountId);
+    if (!acc) return null;
+    if (enabled !== undefined) acc.autoRenewEnabled = Boolean(enabled);
+    if (days !== undefined) {
+      const v = Number(days);
+      if (!Number.isFinite(v) || v < 1 || v > 30) throw new Error('提前续期天数需在 1~30 之间');
+      acc.autoRenewDays = Math.round(v);
+    }
+    this._save();
+    return this.hydrateTeleaiAccount(acc);
+  }
+
+  markTeleaiAutoRenew(accountId, { ok, message = '' } = {}) {
+    const acc = this.state.teleaiAccounts.find((a) => a.id === accountId);
+    if (!acc) return null;
+    acc.lastAutoRenewAt = Date.now();
+    acc.lastAutoRenewOk = Boolean(ok);
+    acc.lastAutoRenewMessage = String(message || '').slice(0, 200);
     this._save();
     return this.hydrateTeleaiAccount(acc);
   }
@@ -744,6 +772,8 @@ class MultiTenantStore {
 
   hydrateTeleaiAccount(acc) {
     if (!acc) return null;
+    if (acc.autoRenewEnabled === undefined) acc.autoRenewEnabled = true;
+    if (acc.autoRenewDays === undefined) acc.autoRenewDays = 2;
     return {
       id: acc.id,
       ownerId: acc.ownerId,
@@ -761,6 +791,11 @@ class MultiTenantStore {
       authStatus: acc.authStatus || 'valid',
       lastCheckAt: acc.lastCheckAt,
       lastRenewAt: acc.lastRenewAt || null,
+      autoRenewEnabled: acc.autoRenewEnabled !== false,
+      autoRenewDays: Number(acc.autoRenewDays) || 2,
+      lastAutoRenewAt: acc.lastAutoRenewAt || null,
+      lastAutoRenewOk: acc.lastAutoRenewOk === undefined ? null : acc.lastAutoRenewOk,
+      lastAutoRenewMessage: acc.lastAutoRenewMessage || '',
       lastCheckinAt: acc.lastCheckinAt || null,
       lastCheckinOk: acc.lastCheckinOk === undefined ? null : acc.lastCheckinOk,
       lastCheckinMessage: acc.lastCheckinMessage || '',
@@ -782,6 +817,11 @@ class MultiTenantStore {
       authStatus: h.authStatus,
       lastCheckAt: h.lastCheckAt,
       lastRenewAt: h.lastRenewAt,
+      autoRenewEnabled: h.autoRenewEnabled,
+      autoRenewDays: h.autoRenewDays,
+      lastAutoRenewAt: h.lastAutoRenewAt,
+      lastAutoRenewOk: h.lastAutoRenewOk,
+      lastAutoRenewMessage: h.lastAutoRenewMessage,
       lastCheckinAt: h.lastCheckinAt,
       lastCheckinOk: h.lastCheckinOk,
       lastCheckinMessage: h.lastCheckinMessage,

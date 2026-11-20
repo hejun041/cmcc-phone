@@ -8,6 +8,7 @@
  * 因此本引擎负责的是**可用性保活**：
  *   - 按实例设定间隔巡检 instance/list；
  *   - 实例被回收（status=3 / statusReason=10）且开启 autoStart 时自动开机；
+ *   - 账号级自动续期：operationToken 剩余天数低于阈值（默认 2 天）时用保存的密码重登换新 token；
  *   - token 失效（4001）时标记账号过期并停止重试，避免无限打点；
  *   - 把最新状态写回 store，前端轮询即可看到。
  * 真正的协议级（CLINK 三通道 + 假鼠标）保活作为可选能力后续接入。
@@ -19,6 +20,13 @@ class TeleaiKeepaliveEngine {
     this.client = client;
     this.now = now;
     this.timers = new Map(); // instanceId -> { timer, lastRunAt, lastError, state, checks, starts }
+    this.accountTimer = null;
+    this.accountSweepMs = Number(process.env.TELEAI_ACCOUNT_SWEEP_MS) > 0
+      ? Number(process.env.TELEAI_ACCOUNT_SWEEP_MS)
+      : 30 * 60 * 1000; // 默认每 30 分钟扫一次账号到期情况
+    this.autoRenewRetryMs = Number(process.env.TELEAI_AUTORENEW_RETRY_MS) > 0
+      ? Number(process.env.TELEAI_AUTORENEW_RETRY_MS)
+      : 30 * 60 * 1000; // 自动续期失败后的重试间隔
     this.log = (ownerId, message, level = 'info', instanceId = '', name = '') =>
       store.appendLog(ownerId, { level, message, deviceId: instanceId, phoneName: name });
   }
@@ -61,6 +69,68 @@ class TeleaiKeepaliveEngine {
     for (const inst of this.store.listAllTeleaiInstancesInternal()) {
       this.reconcileInstance(inst.id);
     }
+    this.startAccountSweep();
+  }
+
+  /** 账号级定时扫描：自动续期（不依赖实例是否存在） */
+  startAccountSweep() {
+    if (this.accountTimer) return;
+    this.accountTimer = setInterval(() => {
+      this.checkAllAccounts().catch(() => {});
+    }, this.accountSweepMs);
+    if (this.accountTimer.unref) this.accountTimer.unref();
+    // 启动时先跑一次，避免刚重启错过续期窗口
+    setTimeout(() => this.checkAllAccounts().catch(() => {}), 15 * 1000).unref?.();
+  }
+
+  stopAccountSweep() {
+    if (this.accountTimer) {
+      clearInterval(this.accountTimer);
+      this.accountTimer = null;
+    }
+  }
+
+  /**
+   * 遍历账号：operationToken 剩余天数 < autoRenewDays 就用保存的密码重新登录换新 token。
+   * 默认提前 2 天（可改 1~30），失败间隔 30 分钟重试，不会无限打登录接口。
+   */
+  async checkAllAccounts() {
+    const accounts = this.store.listAllTeleaiAccountsInternal();
+    for (const acc of accounts) {
+      if (acc.autoRenewEnabled === false) continue;
+      if (!acc.hasPassword) continue;
+      const days = Number(acc.autoRenewDays) || 2;
+      const exp = acc.tokenExpiresAt ? Number(acc.tokenExpiresAt) : 0;
+      if (!exp) continue;
+      const remainDays = (exp - Date.now()) / 86400000;
+      if (remainDays > days) continue;
+      // 失败按 retry 间隔重试；成功也要间隔（默认 6 小时），避免阈值设得比 token 总时长还大时反复登录
+      const since = acc.lastAutoRenewAt ? Date.now() - acc.lastAutoRenewAt : Infinity;
+      if (acc.lastAutoRenewOk && since < 6 * 3600 * 1000) continue;
+      if (acc.lastAutoRenewAt && since < this.autoRenewRetryMs) continue;
+      try {
+        const data = await this.client.loginWithPassword(acc.loginName, acc.password);
+        this.store.updateTeleaiAccountTokens(acc.id, {
+          operationToken: data.operationToken,
+          operToken: data.operToken,
+          aesKey: data.aesKey,
+          aesIv: data.aesIv,
+          expiresAt: data.expiresAt,
+          authStatus: 'valid',
+          renewed: true,
+        });
+        this.store.markTeleaiAutoRenew(acc.id, { ok: true, message: '自动续期成功' });
+        this.log(
+          acc.ownerId,
+          `账号 ${acc.loginName} 剩余 ${remainDays.toFixed(1)} 天，已自动续期至 ${new Date(data.expiresAt).toLocaleString('zh-CN')}`,
+          'success'
+        );
+      } catch (e) {
+        const msg = e && e.code === '10980039' ? '密码不正确，自动续期失败' : e.message;
+        this.store.markTeleaiAutoRenew(acc.id, { ok: false, message: msg });
+        this.log(acc.ownerId, `账号 ${acc.loginName} 自动续期失败：${msg}`, 'error');
+      }
+    }
   }
 
   reconcileInstance(id) {
@@ -92,6 +162,7 @@ class TeleaiKeepaliveEngine {
 
   stopAll() {
     for (const id of this.timers.keys()) this.stop(id);
+    this.stopAccountSweep();
   }
 
   async tick(id) {

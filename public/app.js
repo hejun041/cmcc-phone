@@ -312,11 +312,12 @@
           <div class="account-pill">
             <div class="account-info">
               <div class="account-phone">${escapeHtml(a.loginName)} ${badge} <span class="badge badge-neutral">星辰电脑</span></div>
-              <div class="account-desc">${escapeHtml(a.remark || '未设置备注')} · Token 到期: ${exp}</div>
+              <div class="account-desc">${escapeHtml(a.remark || '未设置备注')} · Token 到期: ${exp} · 自动续期${a.autoRenewEnabled === false ? '关闭' : `剩 ${a.autoRenewDays || 2} 天触发`}${a.lastAutoRenewOk === false ? '（上次失败）' : ''}</div>
             </div>
             <div style="display:flex;gap:6px;">
               <button class="btn btn-secondary btn-sm" data-act="tl-renew" data-id="${a.id}" data-login="${escapeHtml(a.loginName)}">一键续期</button>
               <button class="btn btn-secondary btn-sm" data-act="tl-checkin" data-id="${a.id}" data-login="${escapeHtml(a.loginName)}">签到</button>
+              <button class="btn btn-secondary btn-sm" data-act="tl-autorenew" data-id="${a.id}" data-enabled="${a.autoRenewEnabled === false ? '1' : '0'}">${a.autoRenewEnabled === false ? '开自动续期' : '关自动续期'}</button>
               <button class="btn btn-secondary btn-sm" data-act="tl-sync" data-id="${a.id}">同步</button>
               <button class="btn btn-danger btn-sm" data-act="tl-unbind" data-id="${a.id}" data-login="${escapeHtml(a.loginName)}">解绑</button>
             </div>
@@ -820,6 +821,15 @@
         } finally {
           btn.disabled = false;
           btn.textContent = '一键续期';
+        }
+      } else if (act === 'tl-autorenew') {
+        const enabling = btn.getAttribute('data-enabled') === '1';
+        try {
+          await api(`/api/teleai/accounts/${id}/autorenew`, { method: 'PATCH', body: { enabled: enabling } });
+          showToast(enabling ? '已开启自动续期（默认剩余 2 天触发）' : '已关闭自动续期');
+          await refreshDashboard(true);
+        } catch (err) {
+          showToast(err.message);
         }
       } else if (act === 'tl-checkin') {
         btn.disabled = true;
